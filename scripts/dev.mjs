@@ -1,12 +1,7 @@
 import { watch } from "node:fs";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { context } from "esbuild";
-
-const staticFiles = [
-  ["manifest.json", "dist/manifest.json"],
-  ["src/popup/popup.html", "dist/popup/popup.html"],
-  ["src/popup/popup.css", "dist/popup/popup.css"],
-];
+import { staticFiles } from "./static-files.mjs";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/popup", { recursive: true });

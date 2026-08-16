@@ -63,6 +63,18 @@ jobs:
               }
               if ($process.HasExited) { break }
             }
+
+            if (-not $passed) {
+              throw "pnpm dev did not reach the development-watch ready state."
+            }
+            if (-not (Test-Path 'dist/popup/context-capsule-logo.png')) {
+              throw 'pnpm dev removed or failed to copy the popup/toolbar logo asset.'
+            }
+            $sourceSize = (Get-Item 'src/popup/context-capsule-logo.png').Length
+            $distSize = (Get-Item 'dist/popup/context-capsule-logo.png').Length
+            if ($sourceSize -ne $distSize) {
+              throw "Development logo copy size mismatch: source=$sourceSize dist=$distSize"
+            }
           }
           finally {
             if (-not $process.HasExited) {
@@ -72,13 +84,10 @@ jobs:
           }
 
           Write-Host $output
-          if (-not $passed) {
-            throw "pnpm dev did not reach the development-watch ready state."
-          }
           if ($output -notmatch [regex]::Escape('does not launch or modify your Firefox/Zen profile')) {
             throw "pnpm dev did not report the existing-browser workflow."
           }
-          Write-Host "Exact 'pnpm dev' watch-mode test passed."
+          Write-Host "Exact 'pnpm dev' watch-mode test passed with the logo present in dist."
 
   dev-isolated-firefox-windows:
     runs-on: windows-latest
