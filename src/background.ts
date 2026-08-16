@@ -2,6 +2,7 @@ import { captureFirefoxSnapshot } from "./browser/capture";
 import { restoreFirefoxSnapshot } from "./browser/restore";
 import { tabCount, type FirefoxSnapshot, type RestoreReport } from "./browser/model";
 import { NativeClient, type NativeClientStatus } from "./native/client";
+import { NativeRestoreWatcher } from "./native/restore-watcher";
 
 interface ExtensionStatus {
   native: NativeClientStatus;
@@ -32,6 +33,7 @@ let lastRestore: RestoreReport | undefined;
 const native = new NativeClient((status) => {
   nativeStatus = status;
 });
+const restoreWatcher = new NativeRestoreWatcher();
 
 function status(): ExtensionStatus {
   const value: ExtensionStatus = {
@@ -77,6 +79,7 @@ function scheduleSync(delay = 500): void {
 async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Enter a capsule name to restore");
+  if (restoring) throw new Error("A Firefox restore is already in progress");
   restoring = true;
   lastError = undefined;
   try {
@@ -128,6 +131,16 @@ const maybeGroups = (browser as unknown as {
 for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.onRemoved, maybeGroups?.onUpdated]) {
   event?.addListener(() => scheduleSync());
 }
+
+restoreWatcher.start(async (request) => {
+  const state = await restoreCapsule(request.capsule_name);
+  const report = state.last_restore;
+  return {
+    summary: report
+      ? `Firefox: ${report.created_windows} window(s), ${report.created_tabs} tab(s), ${report.created_groups} group(s) created`
+      : "Firefox restore completed",
+  };
+});
 
 native.connect();
 scheduleSync(100);
