@@ -67,7 +67,7 @@ async function captureWindow(
       url,
       pinned: tab.pinned,
       active: tab.active,
-      discarded: tab.discarded,
+      discarded: tab.discarded ?? false,
       muted: tab.mutedInfo?.muted ?? false,
       restorable: isRestorableUrl(url),
     };
