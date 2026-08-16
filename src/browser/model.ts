@@ -56,8 +56,13 @@ export interface FirefoxSnapshot {
 
 export interface RestoreReport {
   created_windows: number;
+  reused_windows: number;
   created_tabs: number;
+  reused_tabs: number;
+  updated_tabs: number;
   created_groups: number;
+  reused_groups: number;
+  geometry_updates: number;
   warnings: string[];
 }
 
