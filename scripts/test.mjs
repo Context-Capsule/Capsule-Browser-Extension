@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import {
   browserDisplayName,
@@ -118,6 +118,26 @@ assert.throws(
     }),
   /profile does not exist/,
 );
+
+const logoPath = "src/popup/context-capsule-logo.png";
+const logo = await stat(logoPath);
+assert(logo.isFile());
+assert(logo.size > 0);
+const logoBytes = await readFile(logoPath);
+assert.equal(logoBytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+assert.equal(logoBytes.readUInt32BE(16), 900);
+assert.equal(logoBytes.readUInt32BE(20), 900);
+
+const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
+assert.equal(manifest.icons["900"], "popup/context-capsule-logo.png");
+assert.equal(manifest.action.default_icon, "popup/context-capsule-logo.png");
+
+const popupHtml = await readFile("src/popup/popup.html", "utf8");
+assert.match(popupHtml, /class="brand-logo"/);
+assert.match(popupHtml, /src="context-capsule-logo\.png"/);
+const popupCss = await readFile("src/popup/popup.css", "utf8");
+assert.match(popupCss, /--accent:\s*#eaff00/i);
+assert.match(popupCss, /\.brand-logo/);
 
 await rm(".test-build", { recursive: true, force: true });
 await mkdir(".test-build", { recursive: true });
