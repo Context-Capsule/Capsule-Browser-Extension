@@ -128,7 +128,7 @@ jobs:
           node-version: 24
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - name: Install the latest official Zen Browser build
+      - name: Install the latest official Zen Browser build and create an existing profile
         shell: pwsh
         run: |
           $release = Invoke-RestMethod `
@@ -158,10 +158,31 @@ jobs:
             throw "Zen installed successfully but zen.exe was not found in a supported location."
           }
 
+          $profileRoot = Join-Path $env:APPDATA "zen"
+          $profile = Join-Path $profileRoot "Profiles\context-capsule-ci.default-release"
+          New-Item -ItemType Directory -Path $profile -Force | Out-Null
+          Set-Content -Path (Join-Path $profile "prefs.js") -Encoding utf8 -Value @'
+          user_pref("browser.shell.checkDefaultBrowser", false);
+          user_pref("browser.startup.page", 0);
+          '@
+          Set-Content -Path (Join-Path $profileRoot "profiles.ini") -Encoding utf8 -Value @'
+          [Profile0]
+          Name=default-release
+          IsRelative=1
+          Path=Profiles/context-capsule-ci.default-release
+          Default=1
+
+          [InstallContextCapsuleCI]
+          Default=Profiles/context-capsule-ci.default-release
+          Locked=1
+          '@
+
           Write-Host "Using Zen: $zen"
+          Write-Host "Existing Zen profile: $profile"
           (Get-Item $zen).VersionInfo | Format-List FileVersion,ProductVersion
           "CONTEXT_CAPSULE_BROWSER=$zen" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Actually run normal pnpm dev through Zen Browser
+          "CONTEXT_CAPSULE_EXPECTED_PROFILE=$profile" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Actually run normal pnpm dev through Zen Browser using the existing profile as a safe copy
         shell: pwsh
         run: |
           $stdout = Join-Path $env:RUNNER_TEMP "context-capsule-zen-dev.stdout.log"
@@ -219,4 +240,13 @@ jobs:
             throw "pnpm dev did not select Zen Browser as requested."
           }
 
-          Write-Host "Exact 'pnpm dev' Zen Browser launch test passed."
+          $expectedProfileMessage = "[Context Capsule] Using Zen Browser profile as isolated base: $env:CONTEXT_CAPSULE_EXPECTED_PROFILE"
+          if ($output -notmatch [regex]::Escape($expectedProfileMessage)) {
+            throw "pnpm dev did not discover and reuse the existing Zen profile as its isolated base."
+          }
+
+          if ($output -notmatch [regex]::Escape('your real daily profile is not modified')) {
+            throw "pnpm dev did not report isolated profile-copy behavior."
+          }
+
+          Write-Host "Exact 'pnpm dev' Zen Browser existing-profile test passed."
