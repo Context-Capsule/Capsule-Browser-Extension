@@ -117,6 +117,7 @@ jobs:
             throw "pnpm dev did not select Firefox as requested."
           }
 
+          $global:LASTEXITCODE = 0
           Write-Host "Exact 'pnpm dev' Firefox launch test passed."
 
   dev-smoke-zen-windows:
@@ -249,4 +250,5 @@ jobs:
             throw "pnpm dev did not report isolated profile-copy behavior."
           }
 
+          $global:LASTEXITCODE = 0
           Write-Host "Exact 'pnpm dev' Zen Browser existing-profile test passed."
