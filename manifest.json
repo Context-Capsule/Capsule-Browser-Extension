@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Context Capsule",
+  "version": "0.1.0",
+  "description": "Capture and restore Firefox windows, tabs, tab groups, and containers with Context Capsule.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "firefox@contextcapsule.app",
+      "strict_min_version": "142.0"
+    }
+  },
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "cookies",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_title": "Context Capsule",
+    "default_popup": "popup/popup.html"
+  }
+}

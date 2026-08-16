@@ -1,22 +1,28 @@
 {
   "name": "capsule-firefox-extension",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Firefox adapter for Context Capsule",
+  "license": "MIT",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "lint": "pnpm build && web-ext lint --source-dir dist --warnings-as-errors",
+    "check": "pnpm typecheck && pnpm test && pnpm lint",
+    "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "packageManager": "pnpm@11.22.0",
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "^11.22.0",
+      "version": "11.22.0",
       "onFail": "download"
     }
   },
-  "type": "module",
   "devDependencies": {
     "@types/firefox-webext-browser": "^143.0.0",
     "esbuild": "^0.28.2",
