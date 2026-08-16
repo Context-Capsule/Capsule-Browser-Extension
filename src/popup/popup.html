@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Context Capsule</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Context Capsule</h1>
+          <p>Firefox workspace adapter</p>
+        </div>
+        <span id="connection" data-connected="false">Connecting…</span>
+      </header>
+      <section class="snapshot">
+        <div id="counts">Inspecting Firefox…</div>
+        <button id="sync" type="button">Sync now</button>
+      </section>
+      <section class="restore">
+        <label for="capsule-name">Saved capsule</label>
+        <div class="restore-row">
+          <input id="capsule-name" type="text" placeholder="my-workspace" autocomplete="off" />
+          <button id="restore" type="button">Restore capsule</button>
+        </div>
+      </section>
+      <pre id="detail" aria-live="polite"></pre>
+      <footer>Private windows are never captured.</footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
