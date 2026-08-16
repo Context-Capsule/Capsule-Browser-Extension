@@ -73,6 +73,9 @@ const popupCss = await readFile("src/popup/popup.css", "utf8");
 assert.match(popupCss, /--accent:\s*#eaff00/i);
 assert.match(popupCss, /min-width:\s*330px/i);
 assert.match(popupCss, /\.brand-logo/);
+assert.match(popupCss, /backdrop-filter:\s*blur\(/i, "popup should use backdrop blur when the browser compositor supports it");
+assert.match(popupCss, /rgba\(/i, "popup should retain a translucent fallback instead of requiring backdrop blur");
+assert.match(popupCss, /@supports not \(\(backdrop-filter:/i, "popup should explicitly define a non-blur fallback");
 
 const productionBuild = spawnSync(process.execPath, ["scripts/build.mjs"], { stdio: "inherit" });
 assert.equal(productionBuild.status, 0, "production build should succeed");
@@ -80,6 +83,8 @@ const builtLogo = await stat("dist/popup/context-capsule-logo.png");
 assert.equal(builtLogo.size, logo.size, "built logo must exist and match the source asset");
 const builtHtml = await readFile("dist/popup/popup.html", "utf8");
 assert.match(builtHtml, /context-capsule-logo\.png/);
+const builtCss = await readFile("dist/popup/popup.css", "utf8");
+assert.match(builtCss, /backdrop-filter:\s*blur\(/i);
 
 await rm(".test-build", { recursive: true, force: true });
 await mkdir(".test-build", { recursive: true });
