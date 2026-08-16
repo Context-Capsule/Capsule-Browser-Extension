@@ -66,11 +66,15 @@ export function tabCount(snapshot: FirefoxSnapshot): number {
 }
 
 export function isRestorableUrl(url: string): boolean {
+  if (url === "about:blank" || url === "about:newtab") {
+    return true;
+  }
+
   try {
     const parsed = new URL(url);
     return ["http:", "https:", "ftp:"].includes(parsed.protocol);
   } catch {
-    return url === "about:blank" || url === "about:newtab";
+    return false;
   }
 }
 
