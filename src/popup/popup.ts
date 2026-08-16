@@ -36,8 +36,14 @@ function render(status: PopupStatus): void {
     );
     if (status.last_restore.warnings.length > 0) messages.push(`${status.last_restore.warnings.length} restore warning(s)`);
   }
-  const error = status.last_error ?? status.native.last_error;
-  if (error) messages.push(error);
+
+  if (!status.native.connected) {
+    if (status.native.last_error) messages.push(`Native messaging: ${status.native.last_error}`);
+    messages.push("Native host setup is required once. In Capsule-CLI run capsule-firefox-host --install, then --doctor.");
+  }
+  if (status.last_error && status.last_error !== status.native.last_error) {
+    messages.push(status.last_error);
+  }
   detail.textContent = messages.join("\n");
 
   syncButton.disabled = status.syncing || status.restoring;
