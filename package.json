@@ -9,6 +9,7 @@
     "clean": "node scripts/clean.mjs",
     "build": "node scripts/build.mjs",
     "dev": "node scripts/dev.mjs",
+    "dev:isolated": "node scripts/dev-browser.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
     "lint": "pnpm build && web-ext lint --source-dir dist --warnings-as-errors",
