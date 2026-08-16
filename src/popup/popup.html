@@ -3,21 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0d08" />
     <title>Context Capsule</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main>
       <header>
-        <div>
-          <h1>Context Capsule</h1>
-          <p>Firefox workspace adapter</p>
+        <div class="brand">
+          <img class="brand-logo" src="context-capsule-logo.png" alt="" />
+          <div class="brand-copy">
+            <h1>Context Capsule</h1>
+            <p>Firefox workspace adapter</p>
+          </div>
         </div>
         <span id="connection" data-connected="false">Connecting…</span>
       </header>
       <section class="snapshot">
         <div id="counts">Inspecting Firefox…</div>
-        <button id="sync" type="button">Sync now</button>
+        <button id="sync" class="primary-action" type="button">Sync now</button>
       </section>
       <section class="restore">
         <label for="capsule-name">Saved capsule</label>
@@ -27,7 +31,10 @@
         </div>
       </section>
       <pre id="detail" aria-live="polite"></pre>
-      <footer>Private windows are never captured.</footer>
+      <footer>
+        <span class="privacy-dot" aria-hidden="true"></span>
+        Private windows are never captured.
+      </footer>
     </main>
     <script src="popup.js"></script>
   </body>
