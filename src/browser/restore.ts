@@ -33,7 +33,7 @@ async function createTab(
   tab: BrowserTabSnapshot,
   warnings: string[],
 ): Promise<browser.tabs.Tab> {
-  const properties: browser.tabs.CreateCreatePropertiesType = {
+  const properties: Parameters<typeof browser.tabs.create>[0] = {
     windowId,
     active: false,
     pinned: tab.pinned,
@@ -62,7 +62,7 @@ async function createTab(
 
 async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
   if (saved.state === "normal") {
-    const geometry: browser.windows.UpdateUpdateInfoType = { state: "normal" };
+    const geometry: Parameters<typeof browser.windows.update>[1] = { state: "normal" };
     if (saved.left !== undefined) geometry.left = saved.left;
     if (saved.top !== undefined) geometry.top = saved.top;
     if (saved.width !== undefined) geometry.width = saved.width;
