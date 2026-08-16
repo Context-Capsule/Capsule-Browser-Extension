@@ -2,7 +2,11 @@ import { context } from "esbuild";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import webExt from "web-ext";
-import { browserDisplayName, resolveFirefoxExecutable } from "./firefox.mjs";
+import {
+  browserDisplayName,
+  resolveBrowserProfile,
+  resolveFirefoxExecutable,
+} from "./firefox.mjs";
 
 const smokeMode = process.argv.includes("--smoke");
 const sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
@@ -40,8 +44,6 @@ async function stop(exitCode = 0, { bounded = false } = {}) {
   await buildContext.dispose().catch(() => undefined);
 
   if (bounded) {
-    // Browser shutdown is asynchronous on Windows. Give it time to release the
-    // temporary profile before forcing the smoke-test process to terminate.
     await sleep(2_000);
     process.exit(exitCode);
   }
@@ -52,14 +54,27 @@ async function stop(exitCode = 0, { bounded = false } = {}) {
 try {
   const browserExecutable = resolveFirefoxExecutable();
   const browserName = browserDisplayName(browserExecutable);
+  const browserProfile = resolveBrowserProfile({ executable: browserExecutable });
+
   console.log(`[Context Capsule] Using ${browserName}: ${browserExecutable}`);
+  if (browserProfile) {
+    console.log(`[Context Capsule] Using ${browserName} profile as isolated base: ${browserProfile}`);
+    console.log("[Context Capsule] web-ext will copy this profile; your real daily profile is not modified.");
+  } else {
+    console.warn(
+      `[Context Capsule] No existing ${browserName} profile was found; web-ext will use a fresh temporary profile.`,
+    );
+  }
+
+  const runOptions = {
+    sourceDir: resolve("dist"),
+    firefox: browserExecutable,
+    noInput: true,
+  };
+  if (browserProfile) runOptions.firefoxProfile = browserProfile;
 
   extensionRunner = await webExt.cmd.run(
-    {
-      sourceDir: resolve("dist"),
-      firefox: browserExecutable,
-      noInput: true,
-    },
+    runOptions,
     {
       shouldExitProgram: false,
     },
