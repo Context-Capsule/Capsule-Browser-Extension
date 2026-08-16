@@ -30,6 +30,28 @@ export function windowsFirefoxCandidates(env = process.env) {
   return [...new Set(result)];
 }
 
+export function windowsZenCandidates(env = process.env) {
+  const machineRoots = [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]
+    .map(cleanCandidate)
+    .filter(Boolean);
+  const localAppData = cleanCandidate(env.LOCALAPPDATA);
+
+  const result = [];
+  for (const root of machineRoots) {
+    result.push(path.win32.join(root, "Zen Browser", "zen.exe"));
+    result.push(path.win32.join(root, "Zen Twilight", "zen.exe"));
+  }
+
+  if (localAppData) {
+    result.push(path.win32.join(localAppData, "Zen Browser", "zen.exe"));
+    result.push(path.win32.join(localAppData, "Zen Twilight", "zen.exe"));
+    result.push(path.win32.join(localAppData, "Programs", "Zen Browser", "zen.exe"));
+    result.push(path.win32.join(localAppData, "Programs", "Zen Twilight", "zen.exe"));
+  }
+
+  return [...new Set(result)];
+}
+
 function commandLines(command, args) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -43,23 +65,25 @@ function commandLines(command, args) {
     .filter(Boolean);
 }
 
-function windowsRegistryCandidates() {
-  const keys = [
-    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\firefox.exe",
-    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\firefox.exe",
-    "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\firefox.exe",
-  ];
-
+function windowsRegistryCandidates(executableNames) {
   const result = [];
-  for (const key of keys) {
-    const query = spawnSync("reg.exe", ["query", key, "/ve"], {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 5_000,
-    });
-    if (query.status === 0) {
-      const executable = parseRegistryExecutable(query.stdout);
-      if (executable) result.push(executable);
+  for (const executableName of executableNames) {
+    const keys = [
+      `HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${executableName}`,
+      `HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${executableName}`,
+      `HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${executableName}`,
+    ];
+
+    for (const key of keys) {
+      const query = spawnSync("reg.exe", ["query", key, "/ve"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 5_000,
+      });
+      if (query.status === 0) {
+        const executable = parseRegistryExecutable(query.stdout);
+        if (executable) result.push(executable);
+      }
     }
   }
   return result;
@@ -70,13 +94,22 @@ function unixFirefoxCandidates(platform) {
     ? [
         "/Applications/Firefox.app/Contents/MacOS/firefox-bin",
         "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox-bin",
+        "/Applications/Zen.app/Contents/MacOS/zen",
       ]
-    : ["/usr/bin/firefox", "/usr/local/bin/firefox"];
+    : ["/usr/bin/firefox", "/usr/local/bin/firefox", "/usr/bin/zen-browser", "/usr/local/bin/zen-browser"];
 
-  for (const command of ["firefox", "firefox-developer-edition"]) {
+  for (const command of ["firefox", "firefox-developer-edition", "zen", "zen-browser"]) {
     names.push(...commandLines("which", [command]));
   }
   return names;
+}
+
+export function browserDisplayName(executable) {
+  const normalized = executable.toLowerCase();
+  if (normalized.endsWith("zen.exe") || normalized.includes("/zen.app/") || /(^|\/)zen-browser$/.test(normalized)) {
+    return normalized.includes("twilight") ? "Zen Twilight" : "Zen Browser";
+  }
+  return "Firefox";
 }
 
 export function resolveFirefoxExecutable({
@@ -84,21 +117,25 @@ export function resolveFirefoxExecutable({
   env = process.env,
   exists = existsSync,
 } = {}) {
-  const explicit = cleanCandidate(env.CONTEXT_CAPSULE_FIREFOX ?? env.WEB_EXT_FIREFOX);
+  const explicit = cleanCandidate(
+    env.CONTEXT_CAPSULE_BROWSER ?? env.CONTEXT_CAPSULE_FIREFOX ?? env.WEB_EXT_FIREFOX,
+  );
   if (explicit) {
     if (exists(explicit)) return explicit;
     throw new Error(
-      `Configured Firefox executable does not exist: ${explicit}\n` +
-        "Set CONTEXT_CAPSULE_FIREFOX to the full path of a real firefox.exe/firefox binary.",
+      `Configured Firefox-compatible browser executable does not exist: ${explicit}\n` +
+        "Set CONTEXT_CAPSULE_BROWSER to the full path of firefox.exe, zen.exe, or another compatible Firefox-family executable.",
     );
   }
 
   let candidates;
   if (platform === "win32") {
     candidates = [
-      ...windowsRegistryCandidates(),
+      ...windowsRegistryCandidates(["firefox.exe", "zen.exe"]),
       ...commandLines("where.exe", ["firefox.exe"]),
+      ...commandLines("where.exe", ["zen.exe"]),
       ...windowsFirefoxCandidates(env),
+      ...windowsZenCandidates(env),
     ];
   } else {
     candidates = unixFirefoxCandidates(platform);
@@ -110,9 +147,10 @@ export function resolveFirefoxExecutable({
 
   const searched = candidates.length > 0 ? candidates.map((item) => `  - ${item}`).join("\n") : "  (no candidates found)";
   throw new Error(
-    "Could not find a usable Firefox installation.\n" +
+    "Could not find a usable Firefox-compatible browser installation.\n" +
       `Searched:\n${searched}\n` +
-      "Install Firefox or set CONTEXT_CAPSULE_FIREFOX to the full executable path.\n" +
-      'Example: $env:CONTEXT_CAPSULE_FIREFOX = "C:\\Program Files\\Mozilla Firefox\\firefox.exe"',
+      "Install Firefox/Zen or set CONTEXT_CAPSULE_BROWSER to the full executable path.\n" +
+      'Firefox example: $env:CONTEXT_CAPSULE_BROWSER = "C:\\Program Files\\Mozilla Firefox\\firefox.exe"\n' +
+      'Zen example:     $env:CONTEXT_CAPSULE_BROWSER = "C:\\Program Files\\Zen Browser\\zen.exe"',
   );
 }
