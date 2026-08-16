@@ -20,6 +20,20 @@ export type NativeRequest =
       request_id: string;
       type: "browser.capsule.get";
       capsule_name: string;
+    }
+  | {
+      protocol_version: typeof NATIVE_PROTOCOL_VERSION;
+      request_id: string;
+      type: "restore.request.wait";
+    }
+  | {
+      protocol_version: typeof NATIVE_PROTOCOL_VERSION;
+      request_id: string;
+      type: "restore.request.complete";
+      restore_request_id: string;
+      restore_ok: boolean;
+      restore_summary?: string;
+      restore_error?: string;
     };
 
 export interface NativeResponse {
@@ -31,6 +45,8 @@ export interface NativeResponse {
   snapshot?: FirefoxSnapshot;
   stored_at_unix_ms?: number;
   host_version?: string;
+  restore_request_id?: string;
+  capsule_name?: string;
 }
 
 export function requestId(): string {
