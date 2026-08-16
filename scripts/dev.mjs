@@ -32,11 +32,15 @@ let stopping = false;
 async function stop(exitCode = 0) {
   if (stopping) return;
   stopping = true;
-  await buildContext.dispose().catch(() => undefined);
+
   if (extensionRunner) {
     await Promise.resolve(extensionRunner.exit()).catch(() => undefined);
   }
-  process.exit(exitCode);
+  await buildContext.dispose().catch(() => undefined);
+
+  // Do not force process.exit(): web-ext/firefox-profile needs a short natural
+  // shutdown window to let Firefox release the temporary profile on Windows.
+  process.exitCode = exitCode;
 }
 
 try {
