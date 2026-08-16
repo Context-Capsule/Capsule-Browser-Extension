@@ -5,6 +5,7 @@ import webExt from "web-ext";
 import { resolveFirefoxExecutable } from "./firefox.mjs";
 
 const smokeMode = process.argv.includes("--smoke");
+const sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/popup", { recursive: true });
@@ -29,7 +30,7 @@ await buildContext.watch();
 let extensionRunner;
 let stopping = false;
 
-async function stop(exitCode = 0) {
+async function stop(exitCode = 0, { bounded = false } = {}) {
   if (stopping) return;
   stopping = true;
 
@@ -38,8 +39,13 @@ async function stop(exitCode = 0) {
   }
   await buildContext.dispose().catch(() => undefined);
 
-  // Do not force process.exit(): web-ext/firefox-profile needs a short natural
-  // shutdown window to let Firefox release the temporary profile on Windows.
+  if (bounded) {
+    // Firefox shutdown is asynchronous on Windows. Give it time to release the
+    // temporary profile before forcing the smoke-test process to terminate.
+    await sleep(2_000);
+    process.exit(exitCode);
+  }
+
   process.exitCode = exitCode;
 }
 
@@ -62,11 +68,11 @@ try {
 
   if (smokeMode) {
     console.log("[Context Capsule] pnpm dev smoke test passed.");
-    await stop(0);
+    await stop(0, { bounded: true });
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
-  await stop(1);
+  await stop(1, { bounded: smokeMode });
 }
 
 process.on("SIGINT", () => void stop(0));
