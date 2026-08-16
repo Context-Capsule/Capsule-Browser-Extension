@@ -2,7 +2,7 @@ import { context } from "esbuild";
 import { cp, mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import webExt from "web-ext";
-import { resolveFirefoxExecutable } from "./firefox.mjs";
+import { browserDisplayName, resolveFirefoxExecutable } from "./firefox.mjs";
 
 const smokeMode = process.argv.includes("--smoke");
 const sleep = (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
@@ -40,7 +40,7 @@ async function stop(exitCode = 0, { bounded = false } = {}) {
   await buildContext.dispose().catch(() => undefined);
 
   if (bounded) {
-    // Firefox shutdown is asynchronous on Windows. Give it time to release the
+    // Browser shutdown is asynchronous on Windows. Give it time to release the
     // temporary profile before forcing the smoke-test process to terminate.
     await sleep(2_000);
     process.exit(exitCode);
@@ -50,13 +50,14 @@ async function stop(exitCode = 0, { bounded = false } = {}) {
 }
 
 try {
-  const firefoxExecutable = resolveFirefoxExecutable();
-  console.log(`[Context Capsule] Using Firefox: ${firefoxExecutable}`);
+  const browserExecutable = resolveFirefoxExecutable();
+  const browserName = browserDisplayName(browserExecutable);
+  console.log(`[Context Capsule] Using ${browserName}: ${browserExecutable}`);
 
   extensionRunner = await webExt.cmd.run(
     {
       sourceDir: resolve("dist"),
-      firefox: firefoxExecutable,
+      firefox: browserExecutable,
       noInput: true,
     },
     {
@@ -64,7 +65,8 @@ try {
     },
   );
 
-  console.log("[Context Capsule] Firefox launched and the temporary extension was installed.");
+  console.log(`[Context Capsule] ${browserName} launched and the temporary extension was installed.`);
+  console.log("[Context Capsule] Browser launch validation passed.");
 
   if (smokeMode) {
     console.log("[Context Capsule] pnpm dev smoke test passed.");
