@@ -22,3 +22,42 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
+
+  dev-smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Ensure a real Firefox executable is available
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramW6432\Mozilla Firefox\firefox.exe",
+            "$env:ProgramFiles\Mozilla Firefox\firefox.exe",
+            "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          $firefox = $candidates | Select-Object -First 1
+          if (-not $firefox) {
+            choco install firefox -y --no-progress
+            $candidates = @(
+              "$env:ProgramW6432\Mozilla Firefox\firefox.exe",
+              "$env:ProgramFiles\Mozilla Firefox\firefox.exe",
+              "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            $firefox = $candidates | Select-Object -First 1
+          }
+
+          if (-not $firefox) {
+            throw "Firefox installation was not found after installation attempt."
+          }
+
+          Write-Host "Using Firefox: $firefox"
+          (Get-Item $firefox).VersionInfo | Format-List FileVersion,ProductVersion
+          "CONTEXT_CAPSULE_FIREFOX=$firefox" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Actually launch pnpm dev and install the extension
+        run: pnpm dev -- --smoke
