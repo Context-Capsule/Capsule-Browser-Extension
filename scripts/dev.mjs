@@ -1,7 +1,10 @@
-import { spawn } from "node:child_process";
 import { context } from "esbuild";
 import { cp, mkdir, rm } from "node:fs/promises";
-import { pnpmProcessSpec } from "./process.mjs";
+import { resolve } from "node:path";
+import webExt from "web-ext";
+import { resolveFirefoxExecutable } from "./firefox.mjs";
+
+const smokeMode = process.argv.includes("--smoke");
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist/popup", { recursive: true });
@@ -23,31 +26,44 @@ const buildContext = await context({
 });
 await buildContext.watch();
 
-const webExtSpec = pnpmProcessSpec([
-  "exec",
-  "web-ext",
-  "run",
-  "--source-dir",
-  "dist",
-  "--no-input",
-]);
-const firefox = spawn(webExtSpec.command, webExtSpec.args, { stdio: "inherit" });
-
+let extensionRunner;
 let stopping = false;
+
 async function stop(exitCode = 0) {
   if (stopping) return;
   stopping = true;
   await buildContext.dispose().catch(() => undefined);
-  if (firefox.exitCode === null) firefox.kill();
+  if (extensionRunner) {
+    await Promise.resolve(extensionRunner.exit()).catch(() => undefined);
+  }
   process.exit(exitCode);
 }
 
-firefox.on("error", (error) => {
-  console.error(`Failed to start web-ext: ${error.message}`);
-  void stop(1);
-});
-firefox.on("exit", (code) => {
-  void stop(code ?? 0);
-});
+try {
+  const firefoxExecutable = resolveFirefoxExecutable();
+  console.log(`[Context Capsule] Using Firefox: ${firefoxExecutable}`);
+
+  extensionRunner = await webExt.cmd.run(
+    {
+      sourceDir: resolve("dist"),
+      firefox: firefoxExecutable,
+      noInput: true,
+    },
+    {
+      shouldExitProgram: false,
+    },
+  );
+
+  console.log("[Context Capsule] Firefox launched and the temporary extension was installed.");
+
+  if (smokeMode) {
+    console.log("[Context Capsule] pnpm dev smoke test passed.");
+    await stop(0);
+  }
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  await stop(1);
+}
+
 process.on("SIGINT", () => void stop(0));
 process.on("SIGTERM", () => void stop(0));
