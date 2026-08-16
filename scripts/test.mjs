@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import {
   browserDisplayName,
   parseRegistryExecutable,
+  profilePathFromIni,
+  resolveBrowserProfile,
   resolveFirefoxExecutable,
   windowsFirefoxCandidates,
   windowsZenCandidates,
@@ -21,6 +23,7 @@ const windowsEnv = {
   ProgramFiles: "C:\\Program Files",
   "ProgramFiles(x86)": "C:\\Program Files (x86)",
   LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local",
+  APPDATA: "C:\\Users\\test\\AppData\\Roaming",
 };
 
 const firefoxCandidates = windowsFirefoxCandidates(windowsEnv);
@@ -65,6 +68,36 @@ assert.equal(
   installedZenPath,
 );
 
+const zenRoot = "C:\\Users\\test\\AppData\\Roaming\\zen";
+const zenProfilesIni = `${zenRoot}\\profiles.ini`;
+const zenProfile = `${zenRoot}\\Profiles\\abc123.default-release`;
+const profilesIni = `[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/abc123.default-release\nDefault=1\n\n[Install123]\nDefault=Profiles/abc123.default-release\nLocked=1\n`;
+assert.equal(profilePathFromIni(profilesIni, zenRoot, "win32"), zenProfile);
+assert.equal(
+  resolveBrowserProfile({
+    executable: installedZenPath,
+    platform: "win32",
+    env: windowsEnv,
+    exists: (candidate) => candidate === zenProfilesIni || candidate === zenProfile,
+    readText: (candidate) => {
+      assert.equal(candidate, zenProfilesIni);
+      return profilesIni;
+    },
+  }),
+  zenProfile,
+);
+
+const explicitProfile = "C:\\Users\\test\\ZenProfiles\\work";
+assert.equal(
+  resolveBrowserProfile({
+    executable: installedZenPath,
+    platform: "win32",
+    env: { CONTEXT_CAPSULE_BROWSER_PROFILE: explicitProfile },
+    exists: (candidate) => candidate === explicitProfile,
+  }),
+  explicitProfile,
+);
+
 assert.throws(
   () =>
     resolveFirefoxExecutable({
@@ -73,6 +106,17 @@ assert.throws(
       exists: () => false,
     }),
   /does not exist/,
+);
+
+assert.throws(
+  () =>
+    resolveBrowserProfile({
+      executable: installedZenPath,
+      platform: "win32",
+      env: { CONTEXT_CAPSULE_BROWSER_PROFILE: "C:\\missing-profile" },
+      exists: () => false,
+    }),
+  /profile does not exist/,
 );
 
 await rm(".test-build", { recursive: true, force: true });
