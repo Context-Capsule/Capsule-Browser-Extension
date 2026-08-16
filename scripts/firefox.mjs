@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -110,6 +110,128 @@ export function browserDisplayName(executable) {
     return normalized.includes("twilight") ? "Zen Twilight" : "Zen Browser";
   }
   return "Firefox";
+}
+
+function parseIniSections(contents) {
+  const sections = [];
+  let current;
+
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(";") || line.startsWith("#")) continue;
+
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      current = { name: sectionMatch[1], values: {} };
+      sections.push(current);
+      continue;
+    }
+
+    if (!current) continue;
+    const equals = line.indexOf("=");
+    if (equals <= 0) continue;
+    current.values[line.slice(0, equals).trim()] = line.slice(equals + 1).trim();
+  }
+
+  return sections;
+}
+
+export function profilePathFromIni(contents, root, platform = process.platform) {
+  const sections = parseIniSections(contents);
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+
+  const installDefault = sections.find(
+    (section) => section.name.startsWith("Install") && section.values.Default,
+  );
+  if (installDefault) {
+    const value = cleanCandidate(installDefault.values.Default);
+    if (value) return pathApi.isAbsolute(value) ? value : pathApi.join(root, value);
+  }
+
+  const profileDefault = sections.find(
+    (section) => section.name.startsWith("Profile") && section.values.Default === "1" && section.values.Path,
+  );
+  if (profileDefault) {
+    const value = cleanCandidate(profileDefault.values.Path);
+    if (!value) return undefined;
+    if (profileDefault.values.IsRelative === "0" || pathApi.isAbsolute(value)) return value;
+    return pathApi.join(root, value);
+  }
+
+  const firstProfile = sections.find(
+    (section) => section.name.startsWith("Profile") && section.values.Path,
+  );
+  if (!firstProfile) return undefined;
+
+  const value = cleanCandidate(firstProfile.values.Path);
+  if (!value) return undefined;
+  if (firstProfile.values.IsRelative === "0" || pathApi.isAbsolute(value)) return value;
+  return pathApi.join(root, value);
+}
+
+function profileRoots(executable, platform, env) {
+  const isZen = browserDisplayName(executable).startsWith("Zen");
+  const home = cleanCandidate(env.HOME ?? env.USERPROFILE);
+
+  if (platform === "win32") {
+    const roaming = cleanCandidate(env.APPDATA);
+    if (!roaming) return [];
+    return [
+      isZen
+        ? path.win32.join(roaming, "zen")
+        : path.win32.join(roaming, "Mozilla", "Firefox"),
+    ];
+  }
+
+  if (platform === "darwin") {
+    if (!home) return [];
+    return [
+      isZen
+        ? path.posix.join(home, "Library", "Application Support", "zen")
+        : path.posix.join(home, "Library", "Application Support", "Firefox"),
+    ];
+  }
+
+  if (!home) return [];
+  return [
+    isZen ? path.posix.join(home, ".zen") : path.posix.join(home, ".mozilla", "firefox"),
+  ];
+}
+
+export function resolveBrowserProfile({
+  executable,
+  platform = process.platform,
+  env = process.env,
+  exists = existsSync,
+  readText = (filePath) => readFileSync(filePath, "utf8"),
+} = {}) {
+  if (!executable) return undefined;
+
+  const explicit = cleanCandidate(env.CONTEXT_CAPSULE_BROWSER_PROFILE ?? env.WEB_EXT_FIREFOX_PROFILE);
+  if (explicit) {
+    if (exists(explicit)) return explicit;
+    throw new Error(
+      `Configured browser profile does not exist: ${explicit}\n` +
+        "Set CONTEXT_CAPSULE_BROWSER_PROFILE to an existing Firefox/Zen profile directory.",
+    );
+  }
+
+  for (const root of profileRoots(executable, platform, env)) {
+    const iniPath = platform === "win32"
+      ? path.win32.join(root, "profiles.ini")
+      : path.posix.join(root, "profiles.ini");
+    if (!exists(iniPath)) continue;
+
+    try {
+      const candidate = profilePathFromIni(readText(iniPath), root, platform);
+      if (candidate && exists(candidate)) return candidate;
+    } catch {
+      // A malformed or temporarily unreadable profile file should not prevent
+      // extension development. web-ext can still fall back to a fresh profile.
+    }
+  }
+
+  return undefined;
 }
 
 export function resolveFirefoxExecutable({
