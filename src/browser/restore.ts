@@ -5,6 +5,7 @@ import {
   type FirefoxSnapshot,
   type RestoreReport,
   isDisposableBootstrapTabs,
+  isPortableTabGroup,
   restorableUrl,
   savedTabsMatchLiveTabs,
 } from "./model";
@@ -20,6 +21,8 @@ interface TabGroupsApi {
   ): Promise<unknown>;
 }
 
+const NEW_WINDOW_SETTLE_MS = 300;
+
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   const root = browser as unknown as {
     tabs: typeof browser.tabs & Partial<TabsGroupingApi>;
@@ -29,6 +32,10 @@ function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   if (typeof root.tabs.group === "function") result.tabs = root.tabs as unknown as TabsGroupingApi;
   if (root.tabGroups) result.groups = root.tabGroups;
   return result;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function createTab(
@@ -44,10 +51,6 @@ async function createTab(
   const url = restorableUrl(tab.url);
   if (url !== undefined) properties.url = url;
   if (tab.cookie_store_id) properties.cookieStoreId = tab.cookie_store_id;
-
-  if (!tab.restorable) {
-    warnings.push(`Cannot restore privileged/internal URL '${tab.url}'; opened about:blank instead.`);
-  }
 
   let created: browser.tabs.Tab;
   try {
@@ -96,6 +99,13 @@ async function restoreGroups(
   }
 
   for (const group of saved.groups) {
+    if (!isPortableTabGroup(group)) {
+      report.warnings.push(
+        `Skipped anonymous tab relationship '${group.key}'; Firefox-derived browsers can expose split/vendor relationships as an anonymous group, so restoring it as a normal group would be unsafe.`,
+      );
+      continue;
+    }
+
     const tabIds = saved.tabs
       .filter((tab) => tab.group_key === group.key && !tab.pinned)
       .sort((a, b) => a.index - b.index)
@@ -165,11 +175,10 @@ async function reconcileTabs(
   }
 
   const activeSaved = saved.tabs.find((tab) => tab.active);
-  if (activeSaved) {
-    const activeRestored = restoredByIndex.get(activeSaved.index);
-    if (activeRestored?.id !== undefined) {
-      await browser.tabs.update(activeRestored.id, { active: true }).catch(() => undefined);
-    }
+  const activeRestored = activeSaved ? restoredByIndex.get(activeSaved.index) : undefined;
+  const fallback = activeRestored ?? [...restoredByIndex.values()][0];
+  if (fallback?.id !== undefined) {
+    await browser.tabs.update(fallback.id, { active: true }).catch(() => undefined);
   }
 }
 
@@ -201,6 +210,13 @@ async function populateWindow(
 ): Promise<void> {
   const restoredByIndex = new Map<number, browser.tabs.Tab>();
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
+    if (!savedTab.restorable) {
+      report.warnings.push(
+        `Skipped privileged/internal tab '${savedTab.title ?? savedTab.url}' because its URL cannot be safely recreated by a WebExtension.`,
+      );
+      continue;
+    }
+
     try {
       const restored = await createTab(windowId, savedTab, report.warnings);
       restoredByIndex.set(savedTab.index, restored);
@@ -237,10 +253,28 @@ async function reuseBootstrapWindow(
   return current.id;
 }
 
-async function createSavedWindow(saved: BrowserWindowSnapshot, report: RestoreReport): Promise<number> {
+async function createSavedWindow(
+  saved: BrowserWindowSnapshot,
+  report: RestoreReport,
+): Promise<number | undefined> {
   const created = await browser.windows.create({ url: "about:blank", focused: false, state: "normal" });
   if (created.id === undefined) throw new Error("Firefox created a window without an ID");
-  await populateWindow(created.id, created.tabs?.[0]?.id, saved, report);
+
+  // Standard Firefox creates one blank bootstrap tab. Zen and other Firefox-derived
+  // browsers can synchronize a Space into the new window instead. Never assume the
+  // first returned tab is disposable: that can delete Essentials or mutate an
+  // existing synchronized context.
+  await delay(NEW_WINDOW_SETTLE_MS);
+  const settled = await browser.windows.get(created.id, { populate: true }).catch(() => created);
+  if (!disposableBootstrapWindow(settled)) {
+    await browser.windows.remove(created.id).catch(() => undefined);
+    report.warnings.push(
+      `Skipped creating ${saved.key}: the browser populated the provisional window with non-disposable tabs. The provisional window was closed without changing those tabs to avoid corrupting synchronized tabs/Essentials.`,
+    );
+    return undefined;
+  }
+
+  await populateWindow(created.id, settled.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
   return created.id;
 }
@@ -266,7 +300,7 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
       && !usedWindowIds.has(window.id)
       && windowAlreadyContainsSnapshot(savedWindow, window));
 
-    let id: number;
+    let id: number | undefined;
     if (satisfied) {
       id = await reuseSatisfiedWindow(savedWindow, satisfied, report);
       usedWindowIds.add(id);
@@ -282,7 +316,7 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
         id = await createSavedWindow(savedWindow, report);
       }
     }
-    if (savedWindow.focused) focusedWindowId = id;
+    if (id !== undefined && savedWindow.focused) focusedWindowId = id;
   }
 
   if (focusedWindowId !== undefined) {
