@@ -76,6 +76,12 @@ function scheduleSync(delay = 500): void {
   }, delay);
 }
 
+function restoreOptions() {
+  return {
+    createBlankWindow: () => native.createBlankBrowserWindow(),
+  };
+}
+
 async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Enter a capsule name to restore");
@@ -83,7 +89,7 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   lastError = undefined;
   try {
     const snapshot = await native.getCapsule(trimmed);
-    lastRestore = await restoreFirefoxSnapshot(snapshot);
+    lastRestore = await restoreFirefoxSnapshot(snapshot, restoreOptions());
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
     throw error;
@@ -105,7 +111,7 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     if (request.adapter !== "firefox" || request.schema_version !== 1) {
       throw new Error("Unsupported Context Capsule Firefox restore request");
     }
-    report = await restoreFirefoxSnapshot(request.payload);
+    report = await restoreFirefoxSnapshot(request.payload, restoreOptions());
     lastRestore = report;
   } catch (error) {
     restoreError = error instanceof Error ? error.message : String(error);

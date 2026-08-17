@@ -92,6 +92,16 @@ export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
   return url === "about:blank" || url === "about:newtab" || url === "about:home";
 }
 
+/**
+ * Firefox exposes ordinary tab groups, but Firefox-derived browsers can also
+ * surface vendor-specific relationships through the same groupId field. An
+ * anonymous group has no portable identity that lets Context Capsule safely
+ * distinguish those cases, so restore it as independent tabs instead.
+ */
+export function isPortableTabGroup(group: BrowserTabGroupSnapshot): boolean {
+  return group.title.trim().length > 0;
+}
+
 export function tabCount(snapshot: FirefoxSnapshot): number {
   return snapshot.windows.reduce((total, window) => total + window.tabs.length, 0);
 }
@@ -113,5 +123,5 @@ export function restorableUrl(url: string): string | undefined {
   if (url === "about:newtab") {
     return undefined;
   }
-  return isRestorableUrl(url) ? url : "about:blank";
+  return isRestorableUrl(url) ? url : undefined;
 }

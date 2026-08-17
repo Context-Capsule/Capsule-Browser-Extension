@@ -1,5 +1,6 @@
 import {
   isDisposableBootstrapTabs,
+  isPortableTabGroup,
   isRestorableUrl,
   restorableUrl,
   savedTabsMatchLiveTabs,
@@ -19,7 +20,7 @@ assert(!isRestorableUrl("about:config"), "privileged about URL must not be resto
 assert(!isRestorableUrl("moz-extension://abc/popup.html"), "extension URL must not be restored");
 assert(!isRestorableUrl("file:///C:/secret.txt"), "file URL must not be restored");
 assert(restorableUrl("about:newtab") === undefined, "newtab should be restored by omitting URL");
-assert(restorableUrl("about:config") === "about:blank", "privileged URL should fall back to blank");
+assert(restorableUrl("about:config") === undefined, "privileged URL should be skipped instead of becoming a blank tab");
 
 assert(
   isDisposableBootstrapTabs([{ index: 0, url: "about:newtab", pinned: false }]),
@@ -43,6 +44,15 @@ assert(
     { index: 1, url: "about:blank", pinned: false },
   ]),
   "multi-tab windows must not be treated as disposable startup state",
+);
+
+assert(
+  !isPortableTabGroup({ key: "group-0", title: "", color: "blue", collapsed: false }),
+  "anonymous groups are ambiguous with vendor-specific split relationships and must not be synthesized",
+);
+assert(
+  isPortableTabGroup({ key: "group-1", title: "Research", color: "blue", collapsed: false }),
+  "named Firefox tab groups have enough semantic identity to restore",
 );
 
 const snapshot: FirefoxSnapshot = {
