@@ -1,6 +1,7 @@
 import {
   type BrowserTabSnapshot,
   type BrowserWindowSnapshot,
+  type ComparableLiveTab,
   type FirefoxSnapshot,
   type RestoreReport,
   restorableUrl,
@@ -117,16 +118,18 @@ async function restoreGroups(
   }
 }
 
+function comparableLiveTab(tab: browser.tabs.Tab): ComparableLiveTab {
+  const comparable: ComparableLiveTab = {
+    index: tab.index,
+    pinned: tab.pinned,
+  };
+  if (tab.url !== undefined) comparable.url = tab.url;
+  if (tab.cookieStoreId !== undefined) comparable.cookieStoreId = tab.cookieStoreId;
+  return comparable;
+}
+
 function windowAlreadyContainsSnapshot(saved: BrowserWindowSnapshot, current: browser.windows.Window): boolean {
-  return savedTabsMatchLiveTabs(
-    saved,
-    (current.tabs ?? []).map((tab) => ({
-      index: tab.index,
-      url: tab.url,
-      pinned: tab.pinned,
-      cookieStoreId: tab.cookieStoreId,
-    })),
-  );
+  return savedTabsMatchLiveTabs(saved, (current.tabs ?? []).map(comparableLiveTab));
 }
 
 function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): Map<number, browser.tabs.Tab> {
