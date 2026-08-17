@@ -24,8 +24,15 @@
       "onFail": "download"
     }
   },
+  "dependencies": {
+    "@samasante/liquid-glass": "0.1.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
   "devDependencies": {
     "@types/firefox-webext-browser": "^143.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "web-ext": "^10.6.0"
