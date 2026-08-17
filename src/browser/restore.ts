@@ -4,6 +4,7 @@ import {
   type FirefoxSnapshot,
   type RestoreReport,
   restorableUrl,
+  savedTabsMatchLiveTabs,
 } from "./model";
 
 interface TabsGroupingApi {
@@ -116,22 +117,16 @@ async function restoreGroups(
   }
 }
 
-function comparableUrl(tab: browser.tabs.Tab): string {
-  return tab.url ?? "about:blank";
-}
-
 function windowAlreadyContainsSnapshot(saved: BrowserWindowSnapshot, current: browser.windows.Window): boolean {
-  const currentTabs = [...(current.tabs ?? [])].sort((a, b) => a.index - b.index);
-  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
-  if (currentTabs.length !== savedTabs.length) return false;
-
-  return savedTabs.every((savedTab, index) => {
-    const tab = currentTabs[index];
-    if (!tab) return false;
-    return comparableUrl(tab) === savedTab.url
-      && tab.pinned === savedTab.pinned
-      && (tab.cookieStoreId ?? undefined) === (savedTab.cookie_store_id ?? undefined);
-  });
+  return savedTabsMatchLiveTabs(
+    saved,
+    (current.tabs ?? []).map((tab) => ({
+      index: tab.index,
+      url: tab.url,
+      pinned: tab.pinned,
+      cookieStoreId: tab.cookieStoreId,
+    })),
+  );
 }
 
 function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): Map<number, browser.tabs.Tab> {
