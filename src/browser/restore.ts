@@ -50,12 +50,6 @@ function currentUrl(tab: browser.tabs.Tab): string {
   return tab.url ?? "about:blank";
 }
 
-function sameContainer(saved: BrowserTabSnapshot, current: browser.tabs.Tab): boolean {
-  const savedStore = saved.cookie_store_id ?? "firefox-default";
-  const currentStore = current.cookieStoreId ?? "firefox-default";
-  return savedStore === currentStore;
-}
-
 export function tabMatchesSnapshot(saved: BrowserTabSnapshot, current: Pick<browser.tabs.Tab, "url" | "cookieStoreId">): boolean {
   const currentValue = current.url ?? "about:blank";
   const savedStore = saved.cookie_store_id ?? "firefox-default";
@@ -68,7 +62,7 @@ export function tabMatchesSnapshot(saved: BrowserTabSnapshot, current: Pick<brow
 function isDisposableBlankWindow(current: CurrentWindow): boolean {
   if (current.tabs.length !== 1) return false;
   const tab = current.tabs[0];
-  if (tab.pinned) return false;
+  if (!tab || tab.pinned) return false;
   return ["about:blank", "about:newtab", "about:home"].includes(currentUrl(tab));
 }
 
@@ -112,49 +106,40 @@ export function windowReuseScore(
     }
   }
   if (overlap > 0) return overlap * 100_000;
+  const first = current.tabs[0];
   const disposable = current.tabs.length === 1
-    && !current.tabs[0].pinned
-    && ["about:blank", "about:newtab", "about:home"].includes(current.tabs[0].url ?? "about:blank");
+    && first !== undefined
+    && !first.pinned
+    && ["about:blank", "about:newtab", "about:home"].includes(first.url ?? "about:blank");
   if (!disposable) return 0;
 
-  const distance = [
+  const pairs: Array<[number | undefined, number | undefined]> = [
     [saved.left, current.left],
     [saved.top, current.top],
     [saved.width, current.width],
     [saved.height, current.height],
-  ].reduce((total, [left, right]) => {
+  ];
+  const distance = pairs.reduce((total, [left, right]) => {
     if (left === undefined || right === undefined) return total;
     return total + Math.min(2000, Math.abs(left - right));
   }, 0);
   return 10_000 - Math.min(9_999, distance);
 }
 
-async function createTab(
-  windowId: number,
-  tab: BrowserTabSnapshot,
-  warnings: string[],
-): Promise<browser.tabs.Tab> {
-  const properties: Parameters<typeof browser.tabs.create>[0] = {
-    windowId,
-    active: false,
-    pinned: tab.pinned,
-  };
+async function createTab(windowId: number, tab: BrowserTabSnapshot, warnings: string[]): Promise<browser.tabs.Tab> {
+  const properties: Parameters<typeof browser.tabs.create>[0] = { windowId, active: false, pinned: tab.pinned };
   const url = restorableUrl(tab.url);
   if (url !== undefined) properties.url = url;
   if (tab.cookie_store_id) properties.cookieStoreId = tab.cookie_store_id;
 
-  if (!tab.restorable) {
-    warnings.push(`Cannot reopen privileged/internal URL '${tab.url}'; using an existing or new about:blank tab.`);
-  }
+  if (!tab.restorable) warnings.push(`Cannot reopen privileged/internal URL '${tab.url}'; using an existing or new about:blank tab.`);
 
   try {
     return await browser.tabs.create(properties);
   } catch (error) {
     if (tab.cookie_store_id) {
       delete properties.cookieStoreId;
-      warnings.push(
-        `Container '${tab.cookie_store_id}' was unavailable for '${tab.title ?? tab.url}'; restored in the default container.`,
-      );
+      warnings.push(`Container '${tab.cookie_store_id}' was unavailable for '${tab.title ?? tab.url}'; restored in the default container.`);
       return browser.tabs.create(properties);
     }
     throw error;
@@ -187,7 +172,6 @@ async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): 
     await browser.windows.update(windowId, geometry);
     return;
   }
-
   await browser.windows.update(windowId, { state: saved.state });
 }
 
@@ -195,10 +179,7 @@ async function chooseCurrentWindows(): Promise<CurrentWindow[]> {
   const windows = await browser.windows.getAll({ populate: true, windowTypes: ["normal"] });
   return windows
     .filter((window) => window.id !== undefined && !window.incognito)
-    .map((window) => ({
-      window,
-      tabs: [...(window.tabs ?? [])].sort((left, right) => left.index - right.index),
-    }));
+    .map((window) => ({ window, tabs: [...(window.tabs ?? [])].sort((left, right) => left.index - right.index) }));
 }
 
 function chooseReusableWindow(saved: BrowserWindowSnapshot, candidates: CurrentWindow[]): number | undefined {
@@ -207,9 +188,7 @@ function chooseReusableWindow(saved: BrowserWindowSnapshot, candidates: CurrentW
   for (const [index, candidate] of candidates.entries()) {
     const overlap = tabOverlapScore(saved, candidate);
     let score = overlap * 100_000;
-    if (overlap === 0 && isDisposableBlankWindow(candidate)) {
-      score = 10_000 - Math.min(9_999, geometryDistance(saved, candidate.window));
-    }
+    if (overlap === 0 && isDisposableBlankWindow(candidate)) score = 10_000 - Math.min(9_999, geometryDistance(saved, candidate.window));
     if (score > bestScore) {
       bestScore = score;
       bestIndex = index;
@@ -218,11 +197,7 @@ function chooseReusableWindow(saved: BrowserWindowSnapshot, candidates: CurrentW
   return bestIndex;
 }
 
-async function reconcileTabProperties(
-  tab: browser.tabs.Tab,
-  saved: BrowserTabSnapshot,
-  report: RestoreReport,
-): Promise<browser.tabs.Tab> {
+async function reconcileTabProperties(tab: browser.tabs.Tab, saved: BrowserTabSnapshot, report: RestoreReport): Promise<browser.tabs.Tab> {
   if (tab.id === undefined) return tab;
   const changes: Parameters<typeof browser.tabs.update>[1] = {};
   if (tab.pinned !== saved.pinned) changes.pinned = saved.pinned;
@@ -235,12 +210,7 @@ async function reconcileTabProperties(
   return tab;
 }
 
-async function reconcileTabs(
-  windowId: number,
-  saved: BrowserWindowSnapshot,
-  initialTabs: browser.tabs.Tab[],
-  report: RestoreReport,
-): Promise<Map<number, browser.tabs.Tab>> {
+async function reconcileTabs(windowId: number, saved: BrowserWindowSnapshot, initialTabs: browser.tabs.Tab[], report: RestoreReport): Promise<Map<number, browser.tabs.Tab>> {
   const remaining = [...initialTabs];
   const restoredByIndex = new Map<number, browser.tabs.Tab>();
   const usedIds = new Set<number>();
@@ -250,61 +220,44 @@ async function reconcileTabs(
     const exactIndex = remaining.findIndex((candidate) => tabMatchesSnapshot(savedTab, candidate));
     if (exactIndex >= 0) {
       tab = remaining.splice(exactIndex, 1)[0];
+      if (!tab) continue;
       report.reused_tabs += 1;
     } else {
       try {
         tab = await createTab(windowId, savedTab, report.warnings);
         report.created_tabs += 1;
       } catch (error) {
-        report.warnings.push(
-          `Failed to restore '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`,
-        );
+        report.warnings.push(`Failed to restore '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`);
         continue;
       }
     }
 
     tab = await reconcileTabProperties(tab, savedTab, report).catch((error) => {
-      report.warnings.push(
-        `Could not reconcile '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`,
-      );
+      report.warnings.push(`Could not reconcile '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`);
       return tab as browser.tabs.Tab;
     });
 
     if (tab.id !== undefined) {
       usedIds.add(tab.id);
       await browser.tabs.move(tab.id, { index: savedTab.index }).catch((error) => {
-        report.warnings.push(
-          `Could not restore tab order for '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`,
-        );
+        report.warnings.push(`Could not restore tab order for '${savedTab.title ?? savedTab.url}': ${error instanceof Error ? error.message : String(error)}`);
       });
-      if (savedTab.discarded && !savedTab.active) {
-        await browser.tabs.discard(tab.id).catch(() => undefined);
-      }
+      if (savedTab.discarded && !savedTab.active) await browser.tabs.discard(tab.id).catch(() => undefined);
     }
     restoredByIndex.set(savedTab.index, tab);
   }
 
   if (initialTabs.length === 1 && isDisposableBlankWindow({ window: { id: windowId } as browser.windows.Window, tabs: initialTabs })) {
     const bootstrap = initialTabs[0];
-    if (bootstrap.id !== undefined && !usedIds.has(bootstrap.id) && restoredByIndex.size > 0) {
-      await browser.tabs.remove(bootstrap.id).catch(() => undefined);
-    }
+    if (bootstrap?.id !== undefined && !usedIds.has(bootstrap.id) && restoredByIndex.size > 0) await browser.tabs.remove(bootstrap.id).catch(() => undefined);
   }
-
   return restoredByIndex;
 }
 
-async function reconcileGroups(
-  windowId: number,
-  saved: BrowserWindowSnapshot,
-  restoredByIndex: Map<number, browser.tabs.Tab>,
-  report: RestoreReport,
-): Promise<void> {
+async function reconcileGroups(windowId: number, saved: BrowserWindowSnapshot, restoredByIndex: Map<number, browser.tabs.Tab>, report: RestoreReport): Promise<void> {
   const { tabs: tabsGrouping, groups: groupsApi } = groupingApis();
   if (!tabsGrouping || !groupsApi) {
-    if (saved.groups.length > 0) {
-      report.warnings.push("This Firefox version does not expose the tabGroups API; tabs were restored ungrouped.");
-    }
+    if (saved.groups.length > 0) report.warnings.push("This Firefox version does not expose the tabGroups API; tabs were restored ungrouped.");
     return;
   }
 
@@ -318,16 +271,12 @@ async function reconcileGroups(
     if (tabs.length === 0) continue;
 
     const refreshed = await Promise.all(tabs.map((tab) => browser.tabs.get(tab.id!).catch(() => tab)));
-    const groupIds = new Set(
-      refreshed
-        .map(currentTabGroupId)
-        .filter((id): id is number => id !== undefined && id >= 0),
-    );
-
+    const groupIds = new Set(refreshed.map(currentTabGroupId).filter((id): id is number => id !== undefined && id >= 0));
     try {
       let groupId: number;
-      if (groupIds.size === 1 && refreshed.every((tab) => currentTabGroupId(tab) === [...groupIds][0])) {
-        groupId = [...groupIds][0];
+      const onlyGroupId = [...groupIds][0];
+      if (groupIds.size === 1 && onlyGroupId !== undefined && refreshed.every((tab) => currentTabGroupId(tab) === onlyGroupId)) {
+        groupId = onlyGroupId;
         report.reused_groups += 1;
       } else {
         groupId = await tabsGrouping.group({
@@ -336,36 +285,19 @@ async function reconcileGroups(
         });
         report.created_groups += 1;
       }
-
       const currentGroup = existingGroups.find((candidate) => candidate.id === groupId);
-      if (
-        !currentGroup
-        || currentGroup.title !== group.title
-        || currentGroup.color !== group.color
-        || currentGroup.collapsed !== group.collapsed
-      ) {
-        await groupsApi.update(groupId, {
-          title: group.title,
-          color: group.color,
-          collapsed: group.collapsed,
-        });
+      if (!currentGroup || currentGroup.title !== group.title || currentGroup.color !== group.color || currentGroup.collapsed !== group.collapsed) {
+        await groupsApi.update(groupId, { title: group.title, color: group.color, collapsed: group.collapsed });
       }
     } catch (error) {
-      report.warnings.push(
-        `Failed to restore tab group '${group.title || group.key}': ${error instanceof Error ? error.message : String(error)}`,
-      );
+      report.warnings.push(`Failed to restore tab group '${group.title || group.key}': ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
 
-async function reconcileWindow(
-  saved: BrowserWindowSnapshot,
-  current: CurrentWindow | undefined,
-  report: RestoreReport,
-): Promise<number> {
+async function reconcileWindow(saved: BrowserWindowSnapshot, current: CurrentWindow | undefined, report: RestoreReport): Promise<number> {
   let window: browser.windows.Window;
   let initialTabs: browser.tabs.Tab[];
-
   if (current?.window.id !== undefined) {
     window = current.window;
     initialTabs = current.tabs;
@@ -380,27 +312,16 @@ async function reconcileWindow(
   const windowId = window.id!;
   const restoredByIndex = await reconcileTabs(windowId, saved, initialTabs, report);
   await reconcileGroups(windowId, saved, restoredByIndex, report);
-
   const activeSaved = saved.tabs.find((tab) => tab.active);
   if (activeSaved) {
     const activeRestored = restoredByIndex.get(activeSaved.index);
-    if (activeRestored?.id !== undefined) {
-      await browser.tabs.update(activeRestored.id, { active: true }).catch(() => undefined);
-    }
+    if (activeRestored?.id !== undefined) await browser.tabs.update(activeRestored.id, { active: true }).catch(() => undefined);
   }
-
   if (!geometrySatisfied(window, saved)) {
-    await restoreGeometry(windowId, saved)
-      .then(() => {
-        report.geometry_updates += 1;
-      })
-      .catch((error) => {
-        report.warnings.push(
-          `Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+    await restoreGeometry(windowId, saved).then(() => { report.geometry_updates += 1; }).catch((error) => {
+      report.warnings.push(`Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
-
   return windowId;
 }
 
@@ -416,19 +337,14 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
     geometry_updates: 0,
     warnings: [],
   };
-
   const candidates = await chooseCurrentWindows();
   let focusedWindowId: number | undefined;
-
   for (const savedWindow of snapshot.windows) {
     const reusableIndex = chooseReusableWindow(savedWindow, candidates);
     const current = reusableIndex === undefined ? undefined : candidates.splice(reusableIndex, 1)[0];
     const id = await reconcileWindow(savedWindow, current, report);
     if (savedWindow.focused) focusedWindowId = id;
   }
-
-  if (focusedWindowId !== undefined) {
-    await browser.windows.update(focusedWindowId, { focused: true }).catch(() => undefined);
-  }
+  if (focusedWindowId !== undefined) await browser.windows.update(focusedWindowId, { focused: true }).catch(() => undefined);
   return report;
 }
