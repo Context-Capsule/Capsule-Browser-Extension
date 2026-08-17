@@ -58,6 +58,8 @@ export interface RestoreReport {
   created_windows: number;
   created_tabs: number;
   created_groups: number;
+  reused_windows: number;
+  reused_tabs: number;
   warnings: string[];
 }
 
