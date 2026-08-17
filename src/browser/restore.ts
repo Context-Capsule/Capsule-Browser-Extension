@@ -21,7 +21,19 @@ interface TabGroupsApi {
   ): Promise<unknown>;
 }
 
+export interface RestoreOptions {
+  /**
+   * Optional native fallback used by Firefox-derived browsers whose normal
+   * WebExtension window creation synchronizes an existing workspace instead of
+   * creating a disposable blank window. The callback must only request a new
+   * blank browser window; tab population remains inside this module.
+   */
+  createBlankWindow?: () => Promise<void>;
+}
+
 const NEW_WINDOW_SETTLE_MS = 300;
+const NATIVE_BLANK_WINDOW_TIMEOUT_MS = 5_000;
+const NATIVE_BLANK_WINDOW_POLL_MS = 100;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   const root = browser as unknown as {
@@ -253,9 +265,71 @@ async function reuseBootstrapWindow(
   return current.id;
 }
 
+async function normalWindowIds(): Promise<Set<number>> {
+  const windows = await browser.windows.getAll({ populate: false, windowTypes: ["normal"] });
+  return new Set(windows.map((window) => window.id).filter((id): id is number => id !== undefined));
+}
+
+async function waitForNewDisposableWindow(
+  before: Set<number>,
+  timeoutMs = NATIVE_BLANK_WINDOW_TIMEOUT_MS,
+): Promise<browser.windows.Window | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const windows = await browser.windows.getAll({ populate: true, windowTypes: ["normal"] });
+    const candidate = windows.find((window) =>
+      window.id !== undefined
+      && !before.has(window.id)
+      && !window.incognito
+      && disposableBootstrapWindow(window));
+    if (candidate) return candidate;
+    await delay(NATIVE_BLANK_WINDOW_POLL_MS);
+  }
+  return undefined;
+}
+
+async function createNativeBlankWindow(
+  saved: BrowserWindowSnapshot,
+  report: RestoreReport,
+  options: RestoreOptions,
+): Promise<number | undefined> {
+  if (!options.createBlankWindow) {
+    report.warnings.push(
+      `Skipped creating ${saved.key}: the browser synchronized real tabs into the provisional window and no native blank-window fallback is available. Existing tabs were left untouched.`,
+    );
+    return undefined;
+  }
+
+  const before = await normalWindowIds();
+  try {
+    await options.createBlankWindow();
+  } catch (error) {
+    report.warnings.push(
+      `Skipped creating ${saved.key}: native blank-window fallback failed: ${error instanceof Error ? error.message : String(error)}. Existing tabs were left untouched.`,
+    );
+    return undefined;
+  }
+
+  const blank = await waitForNewDisposableWindow(before);
+  if (blank?.id === undefined) {
+    report.warnings.push(
+      `Skipped creating ${saved.key}: native blank-window fallback did not produce a safe disposable browser window. Existing tabs were left untouched.`,
+    );
+    return undefined;
+  }
+
+  await populateWindow(blank.id, blank.tabs?.[0]?.id, saved, report);
+  report.created_windows += 1;
+  report.warnings.push(
+    `Restored ${saved.key} through the native blank-window fallback because normal window creation synchronized existing browser state.`,
+  );
+  return blank.id;
+}
+
 async function createSavedWindow(
   saved: BrowserWindowSnapshot,
   report: RestoreReport,
+  options: RestoreOptions,
 ): Promise<number | undefined> {
   const created = await browser.windows.create({ url: "about:blank", focused: false, state: "normal" });
   if (created.id === undefined) throw new Error("Firefox created a window without an ID");
@@ -268,10 +342,7 @@ async function createSavedWindow(
   const settled = await browser.windows.get(created.id, { populate: true }).catch(() => created);
   if (!disposableBootstrapWindow(settled)) {
     await browser.windows.remove(created.id).catch(() => undefined);
-    report.warnings.push(
-      `Skipped creating ${saved.key}: the browser populated the provisional window with non-disposable tabs. The provisional window was closed without changing those tabs to avoid corrupting synchronized tabs/Essentials.`,
-    );
-    return undefined;
+    return createNativeBlankWindow(saved, report, options);
   }
 
   await populateWindow(created.id, settled.tabs?.[0]?.id, saved, report);
@@ -279,7 +350,10 @@ async function createSavedWindow(
   return created.id;
 }
 
-export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise<RestoreReport> {
+export async function restoreFirefoxSnapshot(
+  snapshot: FirefoxSnapshot,
+  options: RestoreOptions = {},
+): Promise<RestoreReport> {
   const report: RestoreReport = {
     created_windows: 0,
     created_tabs: 0,
@@ -313,7 +387,7 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
         id = await reuseBootstrapWindow(savedWindow, bootstrap, report);
         usedWindowIds.add(id);
       } else {
-        id = await createSavedWindow(savedWindow, report);
+        id = await createSavedWindow(savedWindow, report, options);
       }
     }
     if (id !== undefined && savedWindow.focused) focusedWindowId = id;
