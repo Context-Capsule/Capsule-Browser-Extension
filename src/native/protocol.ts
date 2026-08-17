@@ -33,6 +33,11 @@ export type NativeRequest =
       request_id: string;
       type: "browser.capsule.get";
       capsule_name: string;
+    }
+  | {
+      protocol_version: typeof NATIVE_PROTOCOL_VERSION;
+      request_id: string;
+      type: "browser.window.blank.create";
     };
 
 export interface NativeResponse {

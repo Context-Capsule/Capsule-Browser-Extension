@@ -86,6 +86,14 @@ export class NativeClient {
     return response.snapshot;
   }
 
+  async createBlankBrowserWindow(): Promise<void> {
+    await this.request({
+      protocol_version: NATIVE_PROTOCOL_VERSION,
+      request_id: requestId(),
+      type: "browser.window.blank.create",
+    });
+  }
+
   private async ping(): Promise<NativeResponse> {
     const response = await this.request({
       protocol_version: NATIVE_PROTOCOL_VERSION,
