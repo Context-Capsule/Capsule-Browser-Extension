@@ -1,4 +1,5 @@
 import {
+  isDisposableBootstrapTabs,
   isRestorableUrl,
   restorableUrl,
   savedTabsMatchLiveTabs,
@@ -19,6 +20,30 @@ assert(!isRestorableUrl("moz-extension://abc/popup.html"), "extension URL must n
 assert(!isRestorableUrl("file:///C:/secret.txt"), "file URL must not be restored");
 assert(restorableUrl("about:newtab") === undefined, "newtab should be restored by omitting URL");
 assert(restorableUrl("about:config") === "about:blank", "privileged URL should fall back to blank");
+
+assert(
+  isDisposableBootstrapTabs([{ index: 0, url: "about:newtab", pinned: false }]),
+  "a single unpinned new-tab page should be safe to reuse as startup bootstrap",
+);
+assert(
+  isDisposableBootstrapTabs([{ index: 0, url: "about:home", pinned: false }]),
+  "a single unpinned home page should be safe to reuse as startup bootstrap",
+);
+assert(
+  !isDisposableBootstrapTabs([{ index: 0, url: "https://example.com", pinned: false }]),
+  "real user content must never be treated as disposable bootstrap state",
+);
+assert(
+  !isDisposableBootstrapTabs([{ index: 0, url: "about:newtab", pinned: true }]),
+  "a pinned startup tab is intentional user state and must not be replaced",
+);
+assert(
+  !isDisposableBootstrapTabs([
+    { index: 0, url: "about:newtab", pinned: false },
+    { index: 1, url: "about:blank", pinned: false },
+  ]),
+  "multi-tab windows must not be treated as disposable startup state",
+);
 
 const snapshot: FirefoxSnapshot = {
   schema_version: 1,
