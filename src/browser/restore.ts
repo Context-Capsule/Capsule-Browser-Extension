@@ -4,6 +4,7 @@ import {
   type ComparableLiveTab,
   type FirefoxSnapshot,
   type RestoreReport,
+  isDisposableBootstrapTabs,
   restorableUrl,
   savedTabsMatchLiveTabs,
 } from "./model";
@@ -128,8 +129,16 @@ function comparableLiveTab(tab: browser.tabs.Tab): ComparableLiveTab {
   return comparable;
 }
 
+function liveTabs(current: browser.windows.Window): ComparableLiveTab[] {
+  return (current.tabs ?? []).map(comparableLiveTab);
+}
+
 function windowAlreadyContainsSnapshot(saved: BrowserWindowSnapshot, current: browser.windows.Window): boolean {
-  return savedTabsMatchLiveTabs(saved, (current.tabs ?? []).map(comparableLiveTab));
+  return savedTabsMatchLiveTabs(saved, liveTabs(current));
+}
+
+function disposableBootstrapWindow(current: browser.windows.Window): boolean {
+  return isDisposableBootstrapTabs(liveTabs(current));
 }
 
 function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): Map<number, browser.tabs.Tab> {
@@ -164,7 +173,7 @@ async function reconcileTabs(
   }
 }
 
-async function reuseWindow(
+async function reuseSatisfiedWindow(
   saved: BrowserWindowSnapshot,
   current: browser.windows.Window,
   report: RestoreReport,
@@ -184,12 +193,12 @@ async function reuseWindow(
   return windowId;
 }
 
-async function restoreWindow(saved: BrowserWindowSnapshot, report: RestoreReport): Promise<number> {
-  const created = await browser.windows.create({ url: "about:blank", focused: false, state: "normal" });
-  if (created.id === undefined) throw new Error("Firefox created a window without an ID");
-  const windowId = created.id;
-  const bootstrapTabId = created.tabs?.[0]?.id;
-
+async function populateWindow(
+  windowId: number,
+  bootstrapTabId: number | undefined,
+  saved: BrowserWindowSnapshot,
+  report: RestoreReport,
+): Promise<void> {
   const restoredByIndex = new Map<number, browser.tabs.Tab>();
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
     try {
@@ -214,9 +223,26 @@ async function restoreWindow(saved: BrowserWindowSnapshot, report: RestoreReport
       `Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
     );
   });
+}
 
+async function reuseBootstrapWindow(
+  saved: BrowserWindowSnapshot,
+  current: browser.windows.Window,
+  report: RestoreReport,
+): Promise<number> {
+  if (current.id === undefined) throw new Error("Firefox returned a bootstrap window without an ID");
+  const bootstrapTabId = current.tabs?.[0]?.id;
+  await populateWindow(current.id, bootstrapTabId, saved, report);
+  report.reused_windows += 1;
+  return current.id;
+}
+
+async function createSavedWindow(saved: BrowserWindowSnapshot, report: RestoreReport): Promise<number> {
+  const created = await browser.windows.create({ url: "about:blank", focused: false, state: "normal" });
+  if (created.id === undefined) throw new Error("Firefox created a window without an ID");
+  await populateWindow(created.id, created.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
-  return windowId;
+  return created.id;
 }
 
 export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise<RestoreReport> {
@@ -235,17 +261,26 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
 
   let focusedWindowId: number | undefined;
   for (const savedWindow of snapshot.windows) {
-    const reusable = currentWindows.find((window) =>
+    const satisfied = currentWindows.find((window) =>
       window.id !== undefined
       && !usedWindowIds.has(window.id)
       && windowAlreadyContainsSnapshot(savedWindow, window));
 
     let id: number;
-    if (reusable) {
-      id = await reuseWindow(savedWindow, reusable, report);
+    if (satisfied) {
+      id = await reuseSatisfiedWindow(savedWindow, satisfied, report);
       usedWindowIds.add(id);
     } else {
-      id = await restoreWindow(savedWindow, report);
+      const bootstrap = currentWindows.find((window) =>
+        window.id !== undefined
+        && !usedWindowIds.has(window.id)
+        && disposableBootstrapWindow(window));
+      if (bootstrap) {
+        id = await reuseBootstrapWindow(savedWindow, bootstrap, report);
+        usedWindowIds.add(id);
+      } else {
+        id = await createSavedWindow(savedWindow, report);
+      }
     }
     if (savedWindow.focused) focusedWindowId = id;
   }
