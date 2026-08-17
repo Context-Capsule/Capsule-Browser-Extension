@@ -53,22 +53,22 @@ assert.equal(resolveBrowserProfile({ executable: installedZenPath, platform: "wi
 assert.throws(() => resolveFirefoxExecutable({ platform: "win32", env: { CONTEXT_CAPSULE_BROWSER: "C:\\missing\\zen.exe" }, exists: () => false }), /does not exist/);
 assert.throws(() => resolveBrowserProfile({ executable: installedZenPath, platform: "win32", env: { CONTEXT_CAPSULE_BROWSER_PROFILE: "C:\\missing-profile" }, exists: () => false }), /profile does not exist/);
 
-const logoPath = "src/popup/context-capsule-logo.png";
+const logoPath = "src/popup/capsule-bgless.png";
 const logo = await stat(logoPath);
 assert(logo.isFile());
 assert(logo.size > 0);
 const logoBytes = await readFile(logoPath);
 assert.equal(logoBytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
-assert.equal(logoBytes.readUInt32BE(16), 900);
-assert.equal(logoBytes.readUInt32BE(20), 900);
-assert(staticFiles.some(([source, destination]) => source === logoPath && destination === "dist/popup/context-capsule-logo.png"), "development/build static asset list must include the logo");
+assert(staticFiles.some(([source, destination]) => source === logoPath && destination === "dist/popup/capsule-bgless.png"), "development/build static asset list must include the backgroundless logo");
+assert(!staticFiles.some(([source]) => source.endsWith("context-capsule-logo.png")), "the retired logo must not be copied into the production bundle");
 
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
-assert.equal(manifest.icons["900"], "popup/context-capsule-logo.png");
-assert.equal(manifest.action.default_icon, "popup/context-capsule-logo.png");
+assert.equal(manifest.icons["900"], "popup/capsule-bgless.png");
+assert.equal(manifest.action.default_icon, "popup/capsule-bgless.png");
 const popupHtml = await readFile("src/popup/popup.html", "utf8");
 assert.match(popupHtml, /class="brand-logo"/);
-assert.match(popupHtml, /src="context-capsule-logo\.png"/);
+assert.match(popupHtml, /src="capsule-bgless\.png"/);
+assert.doesNotMatch(popupHtml, /context-capsule-logo\.png/);
 const popupCss = await readFile("src/popup/popup.css", "utf8");
 assert.match(popupCss, /--accent:\s*#eaff00/i);
 assert.match(popupCss, /min-width:\s*330px/i);
@@ -76,10 +76,11 @@ assert.match(popupCss, /\.brand-logo/);
 
 const productionBuild = spawnSync(process.execPath, ["scripts/build.mjs"], { stdio: "inherit" });
 assert.equal(productionBuild.status, 0, "production build should succeed");
-const builtLogo = await stat("dist/popup/context-capsule-logo.png");
-assert.equal(builtLogo.size, logo.size, "built logo must exist and match the source asset");
+const builtLogo = await stat("dist/popup/capsule-bgless.png");
+assert.equal(builtLogo.size, logo.size, "built backgroundless logo must exist and match the source asset");
 const builtHtml = await readFile("dist/popup/popup.html", "utf8");
-assert.match(builtHtml, /context-capsule-logo\.png/);
+assert.match(builtHtml, /capsule-bgless\.png/);
+assert.doesNotMatch(builtHtml, /context-capsule-logo\.png/);
 
 await rm(".test-build", { recursive: true, force: true });
 await mkdir(".test-build", { recursive: true });
