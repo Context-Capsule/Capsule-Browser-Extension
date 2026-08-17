@@ -84,6 +84,14 @@ export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: Compa
   });
 }
 
+export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
+  if (live.length !== 1) return false;
+  const tab = live[0];
+  if (!tab || tab.pinned) return false;
+  const url = tab.url ?? "about:blank";
+  return url === "about:blank" || url === "about:newtab" || url === "about:home";
+}
+
 export function tabCount(snapshot: FirefoxSnapshot): number {
   return snapshot.windows.reduce((total, window) => total + window.tabs.length, 0);
 }
