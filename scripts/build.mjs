@@ -16,6 +16,6 @@ const common = {
 
 await Promise.all([
   build({ ...common, entryPoints: ["src/background.ts"], outfile: "dist/background.js" }),
-  build({ ...common, entryPoints: ["src/popup/popup.ts"], outfile: "dist/popup/popup.js" }),
+  build({ ...common, entryPoints: ["src/popup/popup.tsx"], outfile: "dist/popup/popup.js" }),
   ...staticFiles.map(([source, destination]) => cp(source, destination)),
 ]);
