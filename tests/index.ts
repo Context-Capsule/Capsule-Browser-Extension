@@ -23,6 +23,10 @@ assert(restorableUrl("about:newtab") === undefined, "newtab should be restored b
 assert(restorableUrl("about:config") === undefined, "privileged URL should be skipped instead of becoming a blank tab");
 
 assert(
+  isDisposableBootstrapTabs([]),
+  "a native blank window with zero tabs should be safe to populate",
+);
+assert(
   isDisposableBootstrapTabs([{ index: 0, url: "about:newtab", pinned: false }]),
   "a single unpinned new-tab page should be safe to reuse as startup bootstrap",
 );

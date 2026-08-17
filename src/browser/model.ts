@@ -84,7 +84,13 @@ export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: Compa
   });
 }
 
+/**
+ * A native Zen "New blank window" can surface either with no tabs yet or with
+ * one ordinary blank/new-tab bootstrap. Both shapes are safe to populate.
+ * Anything containing real user state (including multiple tabs) is not.
+ */
 export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
+  if (live.length === 0) return true;
   if (live.length !== 1) return false;
   const tab = live[0];
   if (!tab || tab.pinned) return false;
