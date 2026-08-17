@@ -2,6 +2,7 @@ import { captureFirefoxSnapshot } from "./browser/capture";
 import { restoreFirefoxSnapshot } from "./browser/restore";
 import { tabCount, type FirefoxSnapshot, type RestoreReport } from "./browser/model";
 import { NativeClient, type NativeClientStatus } from "./native/client";
+import type { RestoreRequest } from "./native/protocol";
 
 interface ExtensionStatus {
   native: NativeClientStatus;
@@ -28,6 +29,7 @@ let nativeStatus: NativeClientStatus = { connected: false };
 let lastSyncUnixMs: number | undefined;
 let lastError: string | undefined;
 let lastRestore: RestoreReport | undefined;
+let lastHandledRestoreRequestId: string | undefined;
 
 const native = new NativeClient((status) => {
   nativeStatus = status;
@@ -92,6 +94,52 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   return status();
 }
 
+async function completeNativeRestore(request: RestoreRequest): Promise<void> {
+  if (restoring || request.request_id === lastHandledRestoreRequestId) return;
+  restoring = true;
+  lastError = undefined;
+  let report: RestoreReport | undefined;
+  let restoreError: string | undefined;
+
+  try {
+    if (request.adapter !== "firefox" || request.schema_version !== 1) {
+      throw new Error("Unsupported Context Capsule Firefox restore request");
+    }
+    report = await restoreFirefoxSnapshot(request.payload);
+    lastRestore = report;
+  } catch (error) {
+    restoreError = error instanceof Error ? error.message : String(error);
+    lastError = restoreError;
+  }
+
+  try {
+    const snapshot = await captureFirefoxSnapshot();
+    latestSnapshot = snapshot;
+    await native.updateState(snapshot, {
+      requestId: request.request_id,
+      report,
+      error: restoreError,
+    });
+    lastSyncUnixMs = Date.now();
+    lastHandledRestoreRequestId = request.request_id;
+  } catch (completionError) {
+    lastError = completionError instanceof Error ? completionError.message : String(completionError);
+  } finally {
+    restoring = false;
+  }
+}
+
+async function pollNativeRestore(): Promise<void> {
+  if (restoring || !native.currentStatus().connected) return;
+  try {
+    const request = await native.pollRestoreRequest();
+    if (request) await completeNativeRestore(request);
+  } catch {
+    // NativeClient owns connection/reconnect status. A transient poll failure should
+    // not overwrite the user's last semantic restore error every second.
+  }
+}
+
 browser.runtime.onMessage.addListener((message: unknown) => {
   const request = message as Partial<PopupMessage>;
   switch (request.type) {
@@ -132,3 +180,4 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
 native.connect();
 scheduleSync(100);
 setInterval(() => scheduleSync(0), 30_000);
+setInterval(() => void pollNativeRestore(), 1_000);
