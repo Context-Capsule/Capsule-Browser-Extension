@@ -115,11 +115,14 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
   try {
     const snapshot = await captureFirefoxSnapshot();
     latestSnapshot = snapshot;
-    await native.updateState(snapshot, {
-      requestId: request.request_id,
-      report,
-      error: restoreError,
-    });
+    const completion: {
+      requestId: string;
+      report?: RestoreReport;
+      error?: string;
+    } = { requestId: request.request_id };
+    if (report) completion.report = report;
+    if (restoreError) completion.error = restoreError;
+    await native.updateState(snapshot, completion);
     lastSyncUnixMs = Date.now();
     lastHandledRestoreRequestId = request.request_id;
   } catch (completionError) {
