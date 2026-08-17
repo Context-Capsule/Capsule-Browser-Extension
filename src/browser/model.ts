@@ -63,6 +63,27 @@ export interface RestoreReport {
   warnings: string[];
 }
 
+export interface ComparableLiveTab {
+  index: number;
+  url?: string;
+  pinned: boolean;
+  cookieStoreId?: string;
+}
+
+export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: ComparableLiveTab[]): boolean {
+  const currentTabs = [...live].sort((a, b) => a.index - b.index);
+  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
+  if (currentTabs.length !== savedTabs.length) return false;
+
+  return savedTabs.every((savedTab, index) => {
+    const tab = currentTabs[index];
+    if (!tab) return false;
+    return (tab.url ?? "about:blank") === savedTab.url
+      && tab.pinned === savedTab.pinned
+      && (tab.cookieStoreId ?? undefined) === (savedTab.cookie_store_id ?? undefined);
+  });
+}
+
 export function tabCount(snapshot: FirefoxSnapshot): number {
   return snapshot.windows.reduce((total, window) => total + window.tabs.length, 0);
 }
