@@ -3,6 +3,14 @@ import type { FirefoxSnapshot } from "../browser/model";
 export const NATIVE_HOST_NAME = "com.contextcapsule.host";
 export const NATIVE_PROTOCOL_VERSION = 1 as const;
 
+export interface RestoreRequest {
+  schema_version: 1;
+  request_id: string;
+  adapter: "firefox";
+  created_at_unix_ms: number;
+  payload: FirefoxSnapshot;
+}
+
 export type NativeRequest =
   | {
       protocol_version: typeof NATIVE_PROTOCOL_VERSION;
@@ -14,6 +22,11 @@ export type NativeRequest =
       request_id: string;
       type: "browser.state.update";
       snapshot: FirefoxSnapshot;
+      restore_request_id?: string;
+      restore_changed?: number;
+      restore_skipped?: number;
+      restore_warnings?: string[];
+      restore_error?: string;
     }
   | {
       protocol_version: typeof NATIVE_PROTOCOL_VERSION;
@@ -31,6 +44,7 @@ export interface NativeResponse {
   snapshot?: FirefoxSnapshot;
   stored_at_unix_ms?: number;
   host_version?: string;
+  restore_request?: RestoreRequest;
 }
 
 export function requestId(): string {

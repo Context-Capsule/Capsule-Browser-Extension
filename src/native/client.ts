@@ -3,9 +3,10 @@ import {
   NATIVE_PROTOCOL_VERSION,
   type NativeRequest,
   type NativeResponse,
+  type RestoreRequest,
   requestId,
 } from "./protocol";
-import type { FirefoxSnapshot } from "../browser/model";
+import type { FirefoxSnapshot, RestoreReport } from "../browser/model";
 
 export interface NativeClientStatus {
   connected: boolean;
@@ -35,7 +36,7 @@ export class NativeClient {
       port.onMessage.addListener((message: unknown) => this.onMessage(message));
       port.onDisconnect.addListener(() => this.onDisconnect());
       this.setStatus({ connected: true });
-      void this.ping();
+      void this.ping().catch((error) => this.failConnection(error));
     } catch (error) {
       this.failConnection(error);
     }
@@ -45,13 +46,33 @@ export class NativeClient {
     return { ...this.status };
   }
 
-  async updateState(snapshot: FirefoxSnapshot): Promise<NativeResponse> {
-    return this.request({
+  async updateState(
+    snapshot: FirefoxSnapshot,
+    completion?: { requestId: string; report?: RestoreReport; error?: string },
+  ): Promise<NativeResponse> {
+    const request: NativeRequest = {
       protocol_version: NATIVE_PROTOCOL_VERSION,
       request_id: requestId(),
       type: "browser.state.update",
       snapshot,
-    });
+    };
+    if (completion) {
+      request.restore_request_id = completion.requestId;
+      request.restore_changed = completion.report
+        ? completion.report.created_windows + completion.report.created_tabs + completion.report.created_groups
+        : 0;
+      request.restore_skipped = completion.report
+        ? completion.report.reused_windows + completion.report.reused_tabs
+        : 0;
+      request.restore_warnings = completion.report?.warnings ?? [];
+      if (completion.error) request.restore_error = completion.error;
+    }
+    return this.request(request);
+  }
+
+  async pollRestoreRequest(): Promise<RestoreRequest | undefined> {
+    const response = await this.ping();
+    return response.restore_request;
   }
 
   async getCapsule(name: string): Promise<FirefoxSnapshot> {
@@ -65,19 +86,16 @@ export class NativeClient {
     return response.snapshot;
   }
 
-  private async ping(): Promise<void> {
-    try {
-      const response = await this.request({
-        protocol_version: NATIVE_PROTOCOL_VERSION,
-        request_id: requestId(),
-        type: "ping",
-      });
-      const status: NativeClientStatus = { connected: true };
-      if (response.host_version) status.host_version = response.host_version;
-      this.setStatus(status);
-    } catch (error) {
-      this.failConnection(error);
-    }
+  private async ping(): Promise<NativeResponse> {
+    const response = await this.request({
+      protocol_version: NATIVE_PROTOCOL_VERSION,
+      request_id: requestId(),
+      type: "ping",
+    });
+    const status: NativeClientStatus = { connected: true };
+    if (response.host_version) status.host_version = response.host_version;
+    this.setStatus(status);
+    return response;
   }
 
   private request(request: NativeRequest): Promise<NativeResponse> {

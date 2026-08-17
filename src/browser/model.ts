@@ -58,7 +58,38 @@ export interface RestoreReport {
   created_windows: number;
   created_tabs: number;
   created_groups: number;
+  reused_windows: number;
+  reused_tabs: number;
   warnings: string[];
+}
+
+export interface ComparableLiveTab {
+  index: number;
+  url?: string;
+  pinned: boolean;
+  cookieStoreId?: string;
+}
+
+export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: ComparableLiveTab[]): boolean {
+  const currentTabs = [...live].sort((a, b) => a.index - b.index);
+  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
+  if (currentTabs.length !== savedTabs.length) return false;
+
+  return savedTabs.every((savedTab, index) => {
+    const tab = currentTabs[index];
+    if (!tab) return false;
+    return (tab.url ?? "about:blank") === savedTab.url
+      && tab.pinned === savedTab.pinned
+      && (tab.cookieStoreId ?? undefined) === (savedTab.cookie_store_id ?? undefined);
+  });
+}
+
+export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
+  if (live.length !== 1) return false;
+  const tab = live[0];
+  if (!tab || tab.pinned) return false;
+  const url = tab.url ?? "about:blank";
+  return url === "about:blank" || url === "about:newtab" || url === "about:home";
 }
 
 export function tabCount(snapshot: FirefoxSnapshot): number {

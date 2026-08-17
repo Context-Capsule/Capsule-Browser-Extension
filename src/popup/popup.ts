@@ -7,7 +7,14 @@ interface PopupStatus {
   syncing: boolean;
   restoring: boolean;
   last_error?: string;
-  last_restore?: { created_windows: number; created_tabs: number; created_groups: number; warnings: string[] };
+  last_restore?: {
+    created_windows: number;
+    created_tabs: number;
+    created_groups: number;
+    reused_windows?: number;
+    reused_tabs?: number;
+    warnings: string[];
+  };
 }
 
 const connection = document.querySelector<HTMLSpanElement>("#connection")!;
@@ -31,9 +38,14 @@ function render(status: PopupStatus): void {
   if (status.skipped_private_windows > 0) messages.push(`${status.skipped_private_windows} private window(s) intentionally skipped`);
   if (status.native.host_version) messages.push(`Host ${status.native.host_version}`);
   if (status.last_restore) {
+    const reusedWindows = status.last_restore.reused_windows ?? 0;
+    const reusedTabs = status.last_restore.reused_tabs ?? 0;
     messages.push(
-      `Last restore: ${status.last_restore.created_windows} windows, ${status.last_restore.created_tabs} tabs, ${status.last_restore.created_groups} groups`,
+      `Last restore: ${status.last_restore.created_windows} new window(s), ${status.last_restore.created_tabs} new tab(s), ${status.last_restore.created_groups} group(s)`,
     );
+    if (reusedWindows > 0 || reusedTabs > 0) {
+      messages.push(`${reusedWindows} window(s) · ${reusedTabs} tab(s) already satisfied and reused`);
+    }
     if (status.last_restore.warnings.length > 0) messages.push(`${status.last_restore.warnings.length} restore warning(s)`);
   }
 
