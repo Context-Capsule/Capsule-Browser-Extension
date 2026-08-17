@@ -46,18 +46,22 @@ async function createTab(
     warnings.push(`Cannot restore privileged/internal URL '${tab.url}'; opened about:blank instead.`);
   }
 
+  let created: browser.tabs.Tab;
   try {
-    return await browser.tabs.create(properties);
+    created = await browser.tabs.create(properties);
   } catch (error) {
-    if (tab.cookie_store_id) {
-      delete properties.cookieStoreId;
-      warnings.push(
-        `Container '${tab.cookie_store_id}' was unavailable for '${tab.title ?? tab.url}'; restored in the default container.`,
-      );
-      return browser.tabs.create(properties);
-    }
-    throw error;
+    if (!tab.cookie_store_id) throw error;
+    delete properties.cookieStoreId;
+    warnings.push(
+      `Container '${tab.cookie_store_id}' was unavailable for '${tab.title ?? tab.url}'; restored in the default container.`,
+    );
+    created = await browser.tabs.create(properties);
   }
+
+  if (created.id !== undefined && tab.muted) {
+    await browser.tabs.update(created.id, { muted: true }).catch(() => undefined);
+  }
+  return created;
 }
 
 async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
@@ -72,6 +76,114 @@ async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): 
   }
 
   await browser.windows.update(windowId, { state: saved.state });
+}
+
+async function restoreGroups(
+  windowId: number,
+  saved: BrowserWindowSnapshot,
+  restoredByIndex: Map<number, browser.tabs.Tab>,
+  report: RestoreReport,
+): Promise<void> {
+  const { tabs: tabsGrouping, groups: groupsApi } = groupingApis();
+  if (!tabsGrouping || !groupsApi) {
+    if (saved.groups.length > 0) {
+      report.warnings.push("This Firefox version does not expose the tabGroups API; tabs were restored ungrouped.");
+    }
+    return;
+  }
+
+  for (const group of saved.groups) {
+    const tabIds = saved.tabs
+      .filter((tab) => tab.group_key === group.key && !tab.pinned)
+      .sort((a, b) => a.index - b.index)
+      .map((tab) => restoredByIndex.get(tab.index)?.id)
+      .filter((id): id is number => id !== undefined);
+    if (tabIds.length === 0) continue;
+
+    try {
+      const groupId = await tabsGrouping.group({ tabIds, createProperties: { windowId } });
+      await groupsApi.update(groupId, {
+        title: group.title,
+        color: group.color,
+        collapsed: group.collapsed,
+      });
+      report.created_groups += 1;
+    } catch (error) {
+      report.warnings.push(
+        `Failed to restore tab group '${group.title || group.key}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
+function comparableUrl(tab: browser.tabs.Tab): string {
+  return tab.url ?? "about:blank";
+}
+
+function windowAlreadyContainsSnapshot(saved: BrowserWindowSnapshot, current: browser.windows.Window): boolean {
+  const currentTabs = [...(current.tabs ?? [])].sort((a, b) => a.index - b.index);
+  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
+  if (currentTabs.length !== savedTabs.length) return false;
+
+  return savedTabs.every((savedTab, index) => {
+    const tab = currentTabs[index];
+    if (!tab) return false;
+    return comparableUrl(tab) === savedTab.url
+      && tab.pinned === savedTab.pinned
+      && (tab.cookieStoreId ?? undefined) === (savedTab.cookie_store_id ?? undefined);
+  });
+}
+
+function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): Map<number, browser.tabs.Tab> {
+  const result = new Map<number, browser.tabs.Tab>();
+  const currentTabs = [...(current.tabs ?? [])].sort((a, b) => a.index - b.index);
+  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
+  savedTabs.forEach((savedTab, index) => {
+    const currentTab = currentTabs[index];
+    if (currentTab) result.set(savedTab.index, currentTab);
+  });
+  return result;
+}
+
+async function reconcileTabs(
+  saved: BrowserWindowSnapshot,
+  restoredByIndex: Map<number, browser.tabs.Tab>,
+): Promise<void> {
+  for (const savedTab of saved.tabs) {
+    const tab = restoredByIndex.get(savedTab.index);
+    if (tab?.id === undefined) continue;
+    if (tab.mutedInfo?.muted !== savedTab.muted) {
+      await browser.tabs.update(tab.id, { muted: savedTab.muted }).catch(() => undefined);
+    }
+  }
+
+  const activeSaved = saved.tabs.find((tab) => tab.active);
+  if (activeSaved) {
+    const activeRestored = restoredByIndex.get(activeSaved.index);
+    if (activeRestored?.id !== undefined) {
+      await browser.tabs.update(activeRestored.id, { active: true }).catch(() => undefined);
+    }
+  }
+}
+
+async function reuseWindow(
+  saved: BrowserWindowSnapshot,
+  current: browser.windows.Window,
+  report: RestoreReport,
+): Promise<number> {
+  if (current.id === undefined) throw new Error("Firefox returned an existing window without an ID");
+  const windowId = current.id;
+  const restoredByIndex = mapExistingTabs(saved, current);
+  await reconcileTabs(saved, restoredByIndex);
+  await restoreGroups(windowId, saved, restoredByIndex, report);
+  await restoreGeometry(windowId, saved).catch((error) => {
+    report.warnings.push(
+      `Could not reconcile geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+  report.reused_windows += 1;
+  report.reused_tabs += restoredByIndex.size;
+  return windowId;
 }
 
 async function restoreWindow(saved: BrowserWindowSnapshot, report: RestoreReport): Promise<number> {
@@ -97,42 +209,8 @@ async function restoreWindow(saved: BrowserWindowSnapshot, report: RestoreReport
     await browser.tabs.remove(bootstrapTabId).catch(() => undefined);
   }
 
-  const { tabs: tabsGrouping, groups: groupsApi } = groupingApis();
-  if (tabsGrouping && groupsApi) {
-    for (const group of saved.groups) {
-      const tabIds = saved.tabs
-        .filter((tab) => tab.group_key === group.key && !tab.pinned)
-        .sort((a, b) => a.index - b.index)
-        .map((tab) => restoredByIndex.get(tab.index)?.id)
-        .filter((id): id is number => id !== undefined);
-      if (tabIds.length === 0) continue;
-
-      try {
-        const groupId = await tabsGrouping.group({ tabIds, createProperties: { windowId } });
-        await groupsApi.update(groupId, {
-          title: group.title,
-          color: group.color,
-          collapsed: group.collapsed,
-        });
-        report.created_groups += 1;
-      } catch (error) {
-        report.warnings.push(
-          `Failed to restore tab group '${group.title || group.key}': ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-  } else if (saved.groups.length > 0) {
-    report.warnings.push("This Firefox version does not expose the tabGroups API; tabs were restored ungrouped.");
-  }
-
-  const activeSaved = saved.tabs.find((tab) => tab.active);
-  if (activeSaved) {
-    const activeRestored = restoredByIndex.get(activeSaved.index);
-    if (activeRestored?.id !== undefined) {
-      await browser.tabs.update(activeRestored.id, { active: true }).catch(() => undefined);
-    }
-  }
-
+  await restoreGroups(windowId, saved, restoredByIndex, report);
+  await reconcileTabs(saved, restoredByIndex);
   await restoreGeometry(windowId, saved).catch((error) => {
     report.warnings.push(
       `Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
@@ -148,12 +226,29 @@ export async function restoreFirefoxSnapshot(snapshot: FirefoxSnapshot): Promise
     created_windows: 0,
     created_tabs: 0,
     created_groups: 0,
+    reused_windows: 0,
+    reused_tabs: 0,
     warnings: [],
   };
 
+  const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
+    .filter((window) => !window.incognito);
+  const usedWindowIds = new Set<number>();
+
   let focusedWindowId: number | undefined;
   for (const savedWindow of snapshot.windows) {
-    const id = await restoreWindow(savedWindow, report);
+    const reusable = currentWindows.find((window) =>
+      window.id !== undefined
+      && !usedWindowIds.has(window.id)
+      && windowAlreadyContainsSnapshot(savedWindow, window));
+
+    let id: number;
+    if (reusable) {
+      id = await reuseWindow(savedWindow, reusable, report);
+      usedWindowIds.add(id);
+    } else {
+      id = await restoreWindow(savedWindow, report);
+    }
     if (savedWindow.focused) focusedWindowId = id;
   }
 
