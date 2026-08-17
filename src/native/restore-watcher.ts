@@ -87,10 +87,12 @@ export class NativeRestoreWatcher {
           capsule_name: capsuleName,
         });
       } catch {
-        if (!this.stopped && generation === this.generation && !this.port) {
+        if (this.stopped || generation !== this.generation) return;
+        if (!this.port) {
           this.scheduleReconnect();
+          return;
         }
-        return;
+        await delay(RECONNECT_DELAY_MS);
       }
     }
   }
@@ -182,4 +184,8 @@ export class NativeRestoreWatcher {
     }
     this.pending.clear();
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
