@@ -21,6 +21,10 @@ interface TabGroupsApi {
   ): Promise<unknown>;
 }
 
+interface BrowserInfoApi {
+  getBrowserInfo(): Promise<{ name?: string; vendor?: string }>;
+}
+
 export interface RestoreOptions {
   /**
    * Optional native fallback used by Firefox-derived browsers whose normal
@@ -44,6 +48,17 @@ function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   if (typeof root.tabs.group === "function") result.tabs = root.tabs as unknown as TabsGroupingApi;
   if (root.tabGroups) result.groups = root.tabGroups;
   return result;
+}
+
+async function isZenBrowserRuntime(): Promise<boolean> {
+  const runtime = browser.runtime as unknown as Partial<BrowserInfoApi>;
+  if (typeof runtime.getBrowserInfo !== "function") return false;
+  try {
+    const info = await runtime.getBrowserInfo();
+    return `${info.name ?? ""} ${info.vendor ?? ""}`.toLocaleLowerCase("en-US").includes("zen");
+  } catch {
+    return false;
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -240,6 +255,8 @@ async function populateWindow(
     }
   }
 
+  // Do not remove any startup tab until at least one saved tab exists in the
+  // target window. This prevents a failed restore from leaving an empty window.
   if (bootstrapTabId !== undefined && restoredByIndex.size > 0) {
     await browser.tabs.remove(bootstrapTabId).catch(() => undefined);
   }
@@ -295,7 +312,7 @@ async function createNativeBlankWindow(
 ): Promise<number | undefined> {
   if (!options.createBlankWindow) {
     report.warnings.push(
-      `Skipped creating ${saved.key}: the browser synchronized real tabs into the provisional window and no native blank-window fallback is available. Existing tabs were left untouched.`,
+      `Skipped creating ${saved.key}: this Zen restore requires the native blank-window fallback, but none is available. Existing tabs were left untouched.`,
     );
     return undefined;
   }
@@ -313,7 +330,7 @@ async function createNativeBlankWindow(
   const blank = await waitForNewDisposableWindow(before);
   if (blank?.id === undefined) {
     report.warnings.push(
-      `Skipped creating ${saved.key}: native blank-window fallback did not produce a safe disposable browser window. Existing tabs were left untouched.`,
+      `Skipped creating ${saved.key}: native blank-window fallback did not produce a safe empty/new-tab browser window. Existing tabs were left untouched.`,
     );
     return undefined;
   }
@@ -321,15 +338,14 @@ async function createNativeBlankWindow(
   await populateWindow(blank.id, blank.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
   report.warnings.push(
-    `Restored ${saved.key} through the native blank-window fallback because normal window creation synchronized existing browser state.`,
+    `Restored ${saved.key} through Zen's native blank-window path without creating a synchronized provisional window.`,
   );
   return blank.id;
 }
 
-async function createSavedWindow(
+async function createStandardFirefoxWindow(
   saved: BrowserWindowSnapshot,
   report: RestoreReport,
-  options: RestoreOptions,
 ): Promise<number | undefined> {
   const created = await browser.windows.create({ url: "about:blank", focused: false, state: "normal" });
   if (created.id === undefined) throw new Error("Firefox created a window without an ID");
@@ -337,13 +353,31 @@ async function createSavedWindow(
   await delay(NEW_WINDOW_SETTLE_MS);
   const settled = await browser.windows.get(created.id, { populate: true }).catch(() => created);
   if (!disposableBootstrapWindow(settled)) {
+    report.warnings.push(
+      `Skipped creating ${saved.key}: the provisional Firefox window unexpectedly contained real tabs. It was closed without modifying those tabs.`,
+    );
     await browser.windows.remove(created.id).catch(() => undefined);
-    return createNativeBlankWindow(saved, report, options);
+    return undefined;
   }
 
   await populateWindow(created.id, settled.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
   return created.id;
+}
+
+async function createSavedWindow(
+  saved: BrowserWindowSnapshot,
+  report: RestoreReport,
+  options: RestoreOptions,
+  zenRuntime: boolean,
+): Promise<number | undefined> {
+  // Zen's ordinary browser.windows.create/new-window behavior can synchronize
+  // the current Space into the new window. Never create that provisional window
+  // in Zen: go straight to the native "New blank window" path instead.
+  if (zenRuntime) {
+    return createNativeBlankWindow(saved, report, options);
+  }
+  return createStandardFirefoxWindow(saved, report);
 }
 
 export async function restoreFirefoxSnapshot(
@@ -359,6 +393,7 @@ export async function restoreFirefoxSnapshot(
     warnings: [],
   };
 
+  const zenRuntime = await isZenBrowserRuntime();
   const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
     .filter((window) => !window.incognito);
   const usedWindowIds = new Set<number>();
@@ -383,7 +418,7 @@ export async function restoreFirefoxSnapshot(
         id = await reuseBootstrapWindow(savedWindow, bootstrap, report);
         usedWindowIds.add(id);
       } else {
-        id = await createSavedWindow(savedWindow, report, options);
+        id = await createSavedWindow(savedWindow, report, options, zenRuntime);
       }
     }
     if (id !== undefined && savedWindow.focused) focusedWindowId = id;
