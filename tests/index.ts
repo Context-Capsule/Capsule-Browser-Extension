@@ -7,6 +7,7 @@ import {
   tabCount,
   type FirefoxSnapshot,
 } from "../src/browser/model";
+import { normalWindowGeometryMatches } from "../src/browser/restore";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -70,6 +71,10 @@ const snapshot: FirefoxSnapshot = {
       key: "one",
       focused: true,
       state: "normal",
+      left: 240,
+      top: 120,
+      width: 900,
+      height: 700,
       tabs: [{
         index: 0,
         url: "https://a.test",
@@ -130,6 +135,28 @@ assert(
     cookieStoreId: "firefox-container-1",
   }]),
   "different URL topology must not be reused",
+);
+
+assert(
+  normalWindowGeometryMatches(
+    { left: 244, top: 116, width: 905, height: 696, state: "normal" },
+    savedWindow,
+  ),
+  "small native/browser frame variance should count as placed",
+);
+assert(
+  !normalWindowGeometryMatches(
+    { left: 0, top: 0, width: 900, height: 700, state: "normal" },
+    savedWindow,
+  ),
+  "a Zen window cascaded on top of the existing window must be retried",
+);
+assert(
+  !normalWindowGeometryMatches(
+    { left: 240, top: 120, width: 1100, height: 820, state: "normal" },
+    savedWindow,
+  ),
+  "oversized geometry must not be treated as satisfied",
 );
 
 console.log("extension model tests passed");
