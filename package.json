@@ -17,17 +17,17 @@
     "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
   },
   "packageManager": "pnpm@11.22.0",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "11.22.0",
-      "onFail": "download"
-    }
+  "dependencies": {
+    "@samasante/liquid-glass": "0.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@types/firefox-webext-browser": "^143.0.0",
-    "esbuild": "^0.28.2",
-    "typescript": "^7.0.2",
-    "web-ext": "^10.6.0"
+    "@types/firefox-webext-browser": "143.0.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "web-ext": "10.6.0"
   }
 }
