@@ -17,13 +17,6 @@
     "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
   },
   "packageManager": "pnpm@11.22.0",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "11.22.0",
-      "onFail": "download"
-    }
-  },
   "dependencies": {
     "@samasante/liquid-glass": "0.1.1",
     "react": "^19.2.0",
