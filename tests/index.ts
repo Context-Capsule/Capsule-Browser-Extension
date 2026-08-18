@@ -4,6 +4,7 @@ import {
   isRestorableUrl,
   restorableUrl,
   savedTabsMatchLiveTabs,
+  savedWindowSimilarity,
   tabCount,
   type FirefoxSnapshot,
 } from "../src/browser/model";
@@ -125,7 +126,7 @@ assert(
     { index: 0, url: "https://a.test", pinned: false, cookieStoreId: "firefox-container-1" },
     { index: 1, url: "https://extra.test", pinned: false },
   ]),
-  "extra live tabs must not cause a saved window to be reused",
+  "extra live tabs must not count as an exact match",
 );
 assert(
   !savedTabsMatchLiveTabs(savedWindow, [{
@@ -134,7 +135,103 @@ assert(
     pinned: false,
     cookieStoreId: "firefox-container-1",
   }]),
-  "different URL topology must not be reused",
+  "different URL topology must not be reused exactly",
+);
+
+const twoWindowRestore: FirefoxSnapshot = {
+  schema_version: 1,
+  browser: "firefox",
+  extension_version: "0.1.0",
+  captured_at_unix_ms: 2,
+  skipped_private_windows: 0,
+  windows: [
+    {
+      key: "window-0",
+      focused: false,
+      state: "normal",
+      left: 1913,
+      top: 830,
+      width: 1094,
+      height: 647,
+      tabs: [
+        { index: 0, url: "https://www.youtube.com/", pinned: true, active: false, discarded: true, muted: false, restorable: true },
+        { index: 1, url: "https://www.messenger.com/t/example", pinned: true, active: false, discarded: true, muted: false, restorable: true },
+        { index: 3, url: "about:debugging#/runtime/this-firefox", pinned: false, active: true, discarded: false, muted: false, restorable: false },
+        { index: 4, url: "https://www.scaleway.com/en/pricing/managed-databases/", pinned: false, active: false, discarded: false, muted: false, restorable: true },
+        { index: 5, url: "https://domains.cloudflare.com/", pinned: false, active: false, discarded: false, muted: false, restorable: true },
+        { index: 6, url: "https://github.com/Context-Capsule/Capsule-CLI", pinned: false, active: false, discarded: false, muted: false, restorable: true },
+        { index: 7, url: "https://github.com/Context-Capsule/Capsule-Firefox-Extension", pinned: false, active: false, discarded: false, muted: false, restorable: true },
+      ],
+      groups: [],
+    },
+    {
+      key: "window-1",
+      focused: false,
+      state: "maximized",
+      left: -7,
+      top: -7,
+      width: 1550,
+      height: 878,
+      tabs: [
+        {
+          index: 1,
+          url: "https://chatgpt.com/c/example",
+          pinned: false,
+          active: true,
+          discarded: false,
+          muted: false,
+          restorable: true,
+        },
+      ],
+      groups: [],
+    },
+  ],
+};
+
+const savedManyTabs = twoWindowRestore.windows[0]!;
+const savedChatGptOnly = twoWindowRestore.windows[1]!;
+const liveManyTabs = [
+  { index: 0, url: "https://www.youtube.com/", pinned: true },
+  { index: 1, url: "https://www.messenger.com/t/example", pinned: true },
+  { index: 2, url: "https://www.scaleway.com/en/pricing/managed-databases/", pinned: false },
+  { index: 3, url: "https://domains.cloudflare.com/", pinned: false },
+  { index: 4, url: "https://github.com/Context-Capsule/Capsule-CLI", pinned: false },
+  { index: 5, url: "https://github.com/Context-Capsule/Capsule-Firefox-Extension", pinned: false },
+];
+const liveManyTabsWithOneChange = [
+  ...liveManyTabs,
+  { index: 6, url: "https://example.com/new-live-tab", pinned: false },
+];
+const liveLargeWindowContainingChatGpt = [
+  ...liveManyTabs,
+  { index: 6, url: "https://chatgpt.com/c/example", pinned: false },
+];
+
+const manyTabSimilarity = savedWindowSimilarity(savedManyTabs, liveManyTabs);
+assert(
+  !manyTabSimilarity.exact && manyTabSimilarity.score > 0,
+  "a saved many-tab Zen window must still match its live window when the non-restorable debugging tab is absent and indices shift",
+);
+assert(
+  savedWindowSimilarity(savedManyTabs, liveManyTabsWithOneChange).score > 0,
+  "one extra live tab must not make an otherwise strongly matching large Zen window look missing",
+);
+assert(
+  savedWindowSimilarity(savedChatGptOnly, liveLargeWindowContainingChatGpt).score === 0,
+  "a ChatGPT-only saved window must never match a many-tab live window merely because that window also contains ChatGPT",
+);
+assert(
+  savedWindowSimilarity(savedChatGptOnly, [
+    { index: 0, url: "https://chatgpt.com/c/example", pinned: false },
+  ]).score > 0,
+  "a ChatGPT-only saved window must match a ChatGPT-only live window",
+);
+assert(
+  savedWindowSimilarity(savedManyTabs, [
+    { index: 0, url: "https://unrelated.example/", pinned: false },
+    { index: 1, url: "https://another.example/", pinned: false },
+  ]).score === 0,
+  "an unrelated multi-tab window must not be claimed by fuzzy matching",
 );
 
 assert(
