@@ -100,7 +100,7 @@ function Popup(): React.JSX.Element {
         dispersion: 0.14,
         bend: 0.26,
         frost: 8,
-        sheen: 0.58,
+        sheen: 0,
         glow: 0.1,
       }}
     >

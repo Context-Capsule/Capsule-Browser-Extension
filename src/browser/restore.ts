@@ -36,6 +36,9 @@ export interface RestoreOptions {
 const NEW_WINDOW_SETTLE_MS = 300;
 const NATIVE_BLANK_WINDOW_TIMEOUT_MS = 5_000;
 const NATIVE_BLANK_WINDOW_POLL_MS = 100;
+const NORMAL_GEOMETRY_SETTLE_MS = 180;
+const NORMAL_GEOMETRY_RETRIES = 5;
+const NORMAL_GEOMETRY_TOLERANCE = 8;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   const root = browser as unknown as {
@@ -84,14 +87,59 @@ async function createTab(
   return created;
 }
 
+function numberClose(actual: number | undefined, expected: number | undefined): boolean {
+  if (expected === undefined) return true;
+  return actual !== undefined && Math.abs(actual - expected) <= NORMAL_GEOMETRY_TOLERANCE;
+}
+
+export function normalWindowGeometryMatches(
+  actual: Pick<browser.windows.Window, "left" | "top" | "width" | "height" | "state">,
+  saved: Pick<BrowserWindowSnapshot, "left" | "top" | "width" | "height">,
+): boolean {
+  return (actual.state === undefined || actual.state === "normal")
+    && numberClose(actual.left, saved.left)
+    && numberClose(actual.top, saved.top)
+    && numberClose(actual.width, saved.width)
+    && numberClose(actual.height, saved.height);
+}
+
+function describeGeometry(window: Pick<browser.windows.Window, "left" | "top" | "width" | "height" | "state">): string {
+  return `left=${window.left ?? "?"}, top=${window.top ?? "?"}, width=${window.width ?? "?"}, height=${window.height ?? "?"}, state=${window.state ?? "?"}`;
+}
+
+async function restoreNormalGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
+  // Firefox documents that non-normal states cannot be combined with geometry.
+  // More importantly for Zen, the native --blank-window can be re-laid-out by
+  // browser startup/Window Sync shortly after creation. Normalize the state
+  // first, then apply and verify the saved bounds repeatedly until Zen stops
+  // moving the new independent window underneath us.
+  await browser.windows.update(windowId, { state: "normal" });
+  await delay(NORMAL_GEOMETRY_SETTLE_MS);
+
+  const geometry: Parameters<typeof browser.windows.update>[1] = {};
+  if (saved.left !== undefined) geometry.left = saved.left;
+  if (saved.top !== undefined) geometry.top = saved.top;
+  if (saved.width !== undefined) geometry.width = saved.width;
+  if (saved.height !== undefined) geometry.height = saved.height;
+
+  if (Object.keys(geometry).length === 0) return;
+
+  let last: browser.windows.Window | undefined;
+  for (let attempt = 0; attempt < NORMAL_GEOMETRY_RETRIES; attempt += 1) {
+    await browser.windows.update(windowId, geometry);
+    await delay(NORMAL_GEOMETRY_SETTLE_MS * (attempt + 1));
+    last = await browser.windows.get(windowId).catch(() => undefined);
+    if (last && normalWindowGeometryMatches(last, saved)) return;
+  }
+
+  throw new Error(
+    `window bounds did not converge to the saved geometry after ${NORMAL_GEOMETRY_RETRIES} attempts; saved ${describeGeometry({ ...saved, state: "normal" })}; observed ${last ? describeGeometry(last) : "window unavailable"}`,
+  );
+}
+
 async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
   if (saved.state === "normal") {
-    const geometry: Parameters<typeof browser.windows.update>[1] = { state: "normal" };
-    if (saved.left !== undefined) geometry.left = saved.left;
-    if (saved.top !== undefined) geometry.top = saved.top;
-    if (saved.width !== undefined) geometry.width = saved.width;
-    if (saved.height !== undefined) geometry.height = saved.height;
-    await browser.windows.update(windowId, geometry);
+    await restoreNormalGeometry(windowId, saved);
     return;
   }
 
