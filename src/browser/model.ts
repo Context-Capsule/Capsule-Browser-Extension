@@ -70,6 +70,14 @@ export interface ComparableLiveTab {
   cookieStoreId?: string;
 }
 
+export interface SavedWindowSimilarity {
+  score: number;
+  exact: boolean;
+  overlap: number;
+  savedRelevant: number;
+  liveRelevant: number;
+}
+
 export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: ComparableLiveTab[]): boolean {
   const currentTabs = [...live].sort((a, b) => a.index - b.index);
   const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
@@ -130,4 +138,116 @@ export function restorableUrl(url: string): string | undefined {
     return undefined;
   }
   return isRestorableUrl(url) ? url : undefined;
+}
+
+function savedTabIdentity(tab: BrowserTabSnapshot): string | undefined {
+  if (!tab.restorable || !isRestorableUrl(tab.url)) return undefined;
+  return `${tab.pinned ? "p" : "u"}\u0000${tab.cookie_store_id ?? ""}\u0000${tab.url}`;
+}
+
+function liveTabIdentity(tab: ComparableLiveTab): string | undefined {
+  if (!tab.url || !isRestorableUrl(tab.url)) return undefined;
+  return `${tab.pinned ? "p" : "u"}\u0000${tab.cookieStoreId ?? ""}\u0000${tab.url}`;
+}
+
+function multisetOverlap(left: string[], right: string[]): number {
+  const counts = new Map<string, number>();
+  for (const value of right) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+
+  let overlap = 0;
+  for (const value of left) {
+    const remaining = counts.get(value) ?? 0;
+    if (remaining <= 0) continue;
+    overlap += 1;
+    if (remaining === 1) counts.delete(value);
+    else counts.set(value, remaining - 1);
+  }
+  return overlap;
+}
+
+/**
+ * Score whether a live window is already the saved window even when the live
+ * topology is not byte-for-byte identical. Restore must be conservative here:
+ * a false negative creates a duplicate Zen window, while a false positive only
+ * means Context Capsule leaves a changed live window alone.
+ *
+ * Privileged/non-restorable tabs are deliberately excluded from fuzzy identity.
+ * They cannot be recreated and Firefox-derived browsers may expose them
+ * differently between capture and restore. Single-tab windows remain strict so
+ * a saved ChatGPT-only window can never match a large window that merely happens
+ * to contain the same ChatGPT tab. Pinned tabs can be shared Zen Essentials, so
+ * fuzzy matching also requires independent evidence from unpinned tabs.
+ */
+export function savedWindowSimilarity(
+  saved: BrowserWindowSnapshot,
+  live: ComparableLiveTab[],
+): SavedWindowSimilarity {
+  const exact = savedTabsMatchLiveTabs(saved, live);
+  if (exact) {
+    return {
+      score: 100_000 + saved.tabs.length,
+      exact: true,
+      overlap: saved.tabs.length,
+      savedRelevant: saved.tabs.length,
+      liveRelevant: live.length,
+    };
+  }
+
+  const savedRelevantTabs = saved.tabs.filter(tab => savedTabIdentity(tab) !== undefined);
+  const liveRelevantTabs = live.filter(tab => liveTabIdentity(tab) !== undefined);
+  const savedIds = savedRelevantTabs.map(tab => savedTabIdentity(tab)!).filter(Boolean);
+  const liveIds = liveRelevantTabs.map(tab => liveTabIdentity(tab)!).filter(Boolean);
+  const overlap = multisetOverlap(savedIds, liveIds);
+
+  const empty: SavedWindowSimilarity = {
+    score: 0,
+    exact: false,
+    overlap,
+    savedRelevant: savedIds.length,
+    liveRelevant: liveIds.length,
+  };
+  if (savedIds.length === 0 || liveIds.length === 0 || overlap === 0) return empty;
+
+  if (savedIds.length === 1) {
+    return overlap === 1 && liveIds.length === 1
+      ? { ...empty, score: 5_000 }
+      : empty;
+  }
+
+  const savedUnpinnedIds = savedRelevantTabs
+    .filter(tab => !tab.pinned)
+    .map(tab => savedTabIdentity(tab)!);
+  const liveUnpinnedIds = liveRelevantTabs
+    .filter(tab => !tab.pinned)
+    .map(tab => liveTabIdentity(tab)!);
+  if (savedUnpinnedIds.length === 0) return empty;
+
+  const unpinnedOverlap = multisetOverlap(savedUnpinnedIds, liveUnpinnedIds);
+  const requiredUnpinnedOverlap = Math.min(2, savedUnpinnedIds.length);
+  const savedCoverage = overlap / savedIds.length;
+  const liveCoverage = overlap / liveIds.length;
+  const unpinnedCoverage = unpinnedOverlap / savedUnpinnedIds.length;
+
+  if (
+    overlap < 2
+    || unpinnedOverlap < requiredUnpinnedOverlap
+    || savedCoverage < 0.6
+    || liveCoverage < 0.45
+    || unpinnedCoverage < 0.6
+  ) {
+    return empty;
+  }
+
+  const countDelta = Math.abs(savedIds.length - liveIds.length);
+  return {
+    ...empty,
+    score: 1_000
+      + overlap * 100
+      + unpinnedOverlap * 50
+      + Math.round(savedCoverage * 100)
+      + Math.round(liveCoverage * 100)
+      - countDelta * 5,
+  };
 }
