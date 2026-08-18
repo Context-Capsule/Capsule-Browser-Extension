@@ -65,22 +65,36 @@ assert(!staticFiles.some(([source]) => source.endsWith("context-capsule-logo.png
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 assert.equal(manifest.icons["900"], "popup/capsule-bgless.png");
 assert.equal(manifest.action.default_icon, "popup/capsule-bgless.png");
+
 const popupHtml = await readFile("src/popup/popup.html", "utf8");
-assert.match(popupHtml, /class="brand-logo"/);
-assert.match(popupHtml, /src="capsule-bgless\.png"/);
+assert.match(popupHtml, /id="root"/);
+assert.match(popupHtml, /popup\.js/);
 assert.doesNotMatch(popupHtml, /context-capsule-logo\.png/);
+const popupSource = await readFile("src/popup/popup.tsx", "utf8");
+assert.match(popupSource, /from\s+["']@samasante\/liquid-glass["']/);
+assert.match(popupSource, /<Glass/);
+assert.match(popupSource, /capsule-bgless\.png/);
 const popupCss = await readFile("src/popup/popup.css", "utf8");
 assert.match(popupCss, /--accent:\s*#eaff00/i);
-assert.match(popupCss, /min-width:\s*330px/i);
+assert.match(popupCss, /background:\s*transparent\s*!important/i);
+assert.match(popupCss, /\.liquid-shell/);
 assert.match(popupCss, /\.brand-logo/);
+
+const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+assert.equal(packageJson.dependencies["@samasante/liquid-glass"], "0.1.1");
+assert.ok(packageJson.dependencies.react);
+assert.ok(packageJson.dependencies["react-dom"]);
 
 const productionBuild = spawnSync(process.execPath, ["scripts/build.mjs"], { stdio: "inherit" });
 assert.equal(productionBuild.status, 0, "production build should succeed");
 const builtLogo = await stat("dist/popup/capsule-bgless.png");
 assert.equal(builtLogo.size, logo.size, "built backgroundless logo must exist and match the source asset");
 const builtHtml = await readFile("dist/popup/popup.html", "utf8");
-assert.match(builtHtml, /capsule-bgless\.png/);
+assert.match(builtHtml, /id="root"/);
 assert.doesNotMatch(builtHtml, /context-capsule-logo\.png/);
+const builtPopup = await readFile("dist/popup/popup.js", "utf8");
+assert.match(builtPopup, /Context Capsule/);
+assert.ok(builtPopup.length > 10_000, "React/liquid-glass popup bundle should contain the real component runtime");
 
 await rm(".test-build", { recursive: true, force: true });
 await mkdir(".test-build", { recursive: true });
