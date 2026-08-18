@@ -21,18 +21,16 @@ interface TabGroupsApi {
   ): Promise<unknown>;
 }
 
-interface BrowserInfoApi {
-  getBrowserInfo(): Promise<{ name?: string; vendor?: string }>;
-}
+export type NativeBlankWindowResult = "created" | "unsupported";
 
 export interface RestoreOptions {
   /**
-   * Optional native fallback used by Firefox-derived browsers whose normal
-   * WebExtension window creation synchronizes an existing workspace instead of
-   * creating a disposable blank window. The callback must only request a new
-   * blank browser window; tab population remains inside this module.
+   * Ask the native host to create an independent browser window when it knows
+   * how to do so. Zen uses this to avoid Window Sync cloning/mutating the
+   * current Space. Plain Firefox reports "unsupported" and uses the standard
+   * WebExtension windows API instead.
    */
-  createBlankWindow?: () => Promise<void>;
+  createBlankWindow?: () => Promise<NativeBlankWindowResult>;
 }
 
 const NEW_WINDOW_SETTLE_MS = 300;
@@ -48,17 +46,6 @@ function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   if (typeof root.tabs.group === "function") result.tabs = root.tabs as unknown as TabsGroupingApi;
   if (root.tabGroups) result.groups = root.tabGroups;
   return result;
-}
-
-async function isZenBrowserRuntime(): Promise<boolean> {
-  const runtime = browser.runtime as unknown as Partial<BrowserInfoApi>;
-  if (typeof runtime.getBrowserInfo !== "function") return false;
-  try {
-    const info = await runtime.getBrowserInfo();
-    return `${info.name ?? ""} ${info.vendor ?? ""}`.toLocaleLowerCase("en-US").includes("zen");
-  } catch {
-    return false;
-  }
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -119,19 +106,17 @@ async function restoreGroups(
 ): Promise<void> {
   const { tabs: tabsGrouping, groups: groupsApi } = groupingApis();
   if (!tabsGrouping || !groupsApi) {
-    if (saved.groups.length > 0) {
-      report.warnings.push("This Firefox version does not expose the tabGroups API; tabs were restored ungrouped.");
+    if (saved.groups.some(isPortableTabGroup)) {
+      report.warnings.push("This Firefox version does not expose the tabGroups API; named tab groups were restored ungrouped.");
     }
     return;
   }
 
   for (const group of saved.groups) {
-    if (!isPortableTabGroup(group)) {
-      report.warnings.push(
-        `Skipped anonymous tab relationship '${group.key}'; Firefox-derived browsers can expose split/vendor relationships as an anonymous group, so restoring it as a normal group would be unsafe.`,
-      );
-      continue;
-    }
+    // Anonymous group identifiers are also used by some Firefox-derived
+    // browsers for vendor/split relationships. Silently preserve the tabs as
+    // independent tabs instead of emitting a warning on every restore.
+    if (!isPortableTabGroup(group)) continue;
 
     const tabIds = saved.tabs
       .filter((tab) => tab.group_key === group.key && !tab.pinned)
@@ -237,12 +222,7 @@ async function populateWindow(
 ): Promise<void> {
   const restoredByIndex = new Map<number, browser.tabs.Tab>();
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
-    if (!savedTab.restorable) {
-      report.warnings.push(
-        `Skipped privileged/internal tab '${savedTab.title ?? savedTab.url}' because its URL cannot be safely recreated by a WebExtension.`,
-      );
-      continue;
-    }
+    if (!savedTab.restorable) continue;
 
     try {
       const restored = await createTab(windowId, savedTab, report.warnings);
@@ -305,41 +285,41 @@ async function waitForNewDisposableWindow(
   return undefined;
 }
 
-async function createNativeBlankWindow(
+/**
+ * Returns "unsupported" only when the native host explicitly says that the
+ * current browser is not Zen. Undefined means a native Zen attempt failed and
+ * callers must not fall back to browser.windows.create(), because doing so can
+ * mutate a synchronized Zen Space.
+ */
+async function tryCreateNativeBlankWindow(
   saved: BrowserWindowSnapshot,
   report: RestoreReport,
   options: RestoreOptions,
-): Promise<number | undefined> {
-  if (!options.createBlankWindow) {
-    report.warnings.push(
-      `Skipped creating ${saved.key}: this Zen restore requires the native blank-window fallback, but none is available. Existing tabs were left untouched.`,
-    );
-    return undefined;
-  }
+): Promise<number | "unsupported" | undefined> {
+  if (!options.createBlankWindow) return "unsupported";
 
   const before = await normalWindowIds();
+  let outcome: NativeBlankWindowResult;
   try {
-    await options.createBlankWindow();
+    outcome = await options.createBlankWindow();
   } catch (error) {
     report.warnings.push(
-      `Skipped creating ${saved.key}: native blank-window fallback failed: ${error instanceof Error ? error.message : String(error)}. Existing tabs were left untouched.`,
+      `Could not create the independent browser window for ${saved.key}: ${error instanceof Error ? error.message : String(error)}. Existing tabs were left untouched.`,
     );
     return undefined;
   }
+  if (outcome === "unsupported") return "unsupported";
 
   const blank = await waitForNewDisposableWindow(before);
   if (blank?.id === undefined) {
     report.warnings.push(
-      `Skipped creating ${saved.key}: native blank-window fallback did not produce a safe empty/new-tab browser window. Existing tabs were left untouched.`,
+      `Zen reported a new blank window for ${saved.key}, but the extension could not observe a safe disposable window. Existing tabs were left untouched.`,
     );
     return undefined;
   }
 
   await populateWindow(blank.id, blank.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
-  report.warnings.push(
-    `Restored ${saved.key} through Zen's native blank-window path without creating a synchronized provisional window.`,
-  );
   return blank.id;
 }
 
@@ -354,7 +334,7 @@ async function createStandardFirefoxWindow(
   const settled = await browser.windows.get(created.id, { populate: true }).catch(() => created);
   if (!disposableBootstrapWindow(settled)) {
     report.warnings.push(
-      `Skipped creating ${saved.key}: the provisional Firefox window unexpectedly contained real tabs. It was closed without modifying those tabs.`,
+      `Firefox created ${saved.key} with unexpected user tabs; the new window was closed without modifying them.`,
     );
     await browser.windows.remove(created.id).catch(() => undefined);
     return undefined;
@@ -369,14 +349,12 @@ async function createSavedWindow(
   saved: BrowserWindowSnapshot,
   report: RestoreReport,
   options: RestoreOptions,
-  zenRuntime: boolean,
 ): Promise<number | undefined> {
-  // Zen's ordinary browser.windows.create/new-window behavior can synchronize
-  // the current Space into the new window. Never create that provisional window
-  // in Zen: go straight to the native "New blank window" path instead.
-  if (zenRuntime) {
-    return createNativeBlankWindow(saved, report, options);
-  }
+  // Ask the native host first for every missing window. This is deliberately
+  // independent of browser.runtime.getBrowserInfo(): Zen builds can identify
+  // themselves as Firefox there. The native host checks the real executable.
+  const nativeResult = await tryCreateNativeBlankWindow(saved, report, options);
+  if (nativeResult !== "unsupported") return nativeResult;
   return createStandardFirefoxWindow(saved, report);
 }
 
@@ -393,7 +371,6 @@ export async function restoreFirefoxSnapshot(
     warnings: [],
   };
 
-  const zenRuntime = await isZenBrowserRuntime();
   const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
     .filter((window) => !window.incognito);
   const usedWindowIds = new Set<number>();
@@ -418,10 +395,13 @@ export async function restoreFirefoxSnapshot(
         id = await reuseBootstrapWindow(savedWindow, bootstrap, report);
         usedWindowIds.add(id);
       } else {
-        id = await createSavedWindow(savedWindow, report, options, zenRuntime);
+        id = await createSavedWindow(savedWindow, report, options);
       }
     }
-    if (id !== undefined && savedWindow.focused) focusedWindowId = id;
+    if (id !== undefined) {
+      usedWindowIds.add(id);
+      if (savedWindow.focused) focusedWindowId = id;
+    }
   }
 
   if (focusedWindowId !== undefined) {

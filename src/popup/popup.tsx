@@ -91,70 +91,68 @@ function Popup(): React.JSX.Element {
   if (localError) messages.push(localError);
 
   return (
-    <div className="popup-stage">
-      <div className="ambient ambient-one" aria-hidden="true" />
-      <div className="ambient ambient-two" aria-hidden="true" />
-      <Glass
-        className="liquid-shell"
-        optics={{
-          strength: 0.24,
-          depth: 0.72,
-          curvature: 0.32,
-          dispersion: 0.2,
-          bend: 0.34,
-          frost: 10,
-          sheen: 0.72,
-          glow: 0.18,
-        }}
-      >
-        <main>
-          <header>
-            <div className="brand">
-              <img className="brand-logo" src="capsule-bgless.png" alt="" />
-              <div className="brand-copy">
-                <h1>Context Capsule</h1>
-                <p>Zen / Firefox workspace adapter</p>
-              </div>
+    <Glass
+      className="liquid-shell"
+      optics={{
+        strength: 0.2,
+        depth: 0.64,
+        curvature: 0.22,
+        dispersion: 0.14,
+        bend: 0.26,
+        frost: 8,
+        sheen: 0.58,
+        glow: 0.1,
+      }}
+    >
+      <main>
+        <div className="ambient ambient-one" aria-hidden="true" />
+        <div className="ambient ambient-two" aria-hidden="true" />
+        <header>
+          <div className="brand">
+            <img className="brand-logo" src="capsule-bgless.png" alt="" />
+            <div className="brand-copy">
+              <h1>Context Capsule</h1>
+              <p>Zen / Firefox workspace adapter</p>
             </div>
-            <span className="connection" data-connected={connected ? "true" : "false"}>
-              {connected ? "Connected" : "Native host unavailable"}
-            </span>
-          </header>
+          </div>
+          <span className="connection" data-connected={connected ? "true" : "false"}>
+            {connected ? "Connected" : "Native host unavailable"}
+          </span>
+        </header>
 
-          <section className="snapshot glass-section">
-            <div className="counts">
-              {status ? `${status.windows} window${status.windows === 1 ? "" : "s"} · ${status.tabs} tab${status.tabs === 1 ? "" : "s"}` : "Inspecting browser…"}
-            </div>
-            <button className="primary-action" type="button" disabled={busy} onClick={() => void sync()}>
-              {status?.syncing ? "Syncing…" : "Sync now"}
+        <section className="snapshot glass-section">
+          <div className="counts">
+            {status ? `${status.windows} window${status.windows === 1 ? "" : "s"} · ${status.tabs} tab${status.tabs === 1 ? "" : "s"}` : "Inspecting browser…"}
+          </div>
+          <button className="primary-action" type="button" disabled={busy} onClick={() => void sync()}>
+            {status?.syncing ? "Syncing…" : "Sync now"}
+          </button>
+        </section>
+
+        <section className="restore glass-section">
+          <label htmlFor="capsule-name">Saved capsule</label>
+          <div className="restore-row">
+            <input
+              id="capsule-name"
+              type="text"
+              value={capsuleName}
+              onChange={event => setCapsuleName(event.currentTarget.value)}
+              placeholder="my-workspace"
+              autoComplete="off"
+            />
+            <button type="button" disabled={Boolean(status?.restoring) || !connected} onClick={() => void restore()}>
+              {status?.restoring ? "Restoring…" : "Restore capsule"}
             </button>
-          </section>
+          </div>
+        </section>
 
-          <section className="restore glass-section">
-            <label htmlFor="capsule-name">Saved capsule</label>
-            <div className="restore-row">
-              <input
-                id="capsule-name"
-                type="text"
-                value={capsuleName}
-                onChange={event => setCapsuleName(event.currentTarget.value)}
-                placeholder="my-workspace"
-                autoComplete="off"
-              />
-              <button type="button" disabled={Boolean(status?.restoring) || !connected} onClick={() => void restore()}>
-                {status?.restoring ? "Restoring…" : "Restore capsule"}
-              </button>
-            </div>
-          </section>
-
-          <pre aria-live="polite">{messages.join("\n")}</pre>
-          <footer>
-            <span className="privacy-dot" aria-hidden="true" />
-            Private windows are never captured.
-          </footer>
-        </main>
-      </Glass>
-    </div>
+        <pre aria-live="polite">{messages.join("\n")}</pre>
+        <footer>
+          <span className="privacy-dot" aria-hidden="true" />
+          Private windows are never captured.
+        </footer>
+      </main>
+    </Glass>
   );
 }
 

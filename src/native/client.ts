@@ -14,11 +14,15 @@ export interface NativeClientStatus {
   host_version?: string;
 }
 
+export type BlankBrowserWindowResult = "created" | "unsupported";
+
 type Pending = {
   resolve: (response: NativeResponse) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 };
+
+const ZEN_NOT_RUNNING = "no running zen.exe application was detected";
 
 export class NativeClient {
   private port: browser.runtime.Port | undefined;
@@ -86,12 +90,27 @@ export class NativeClient {
     return response.snapshot;
   }
 
-  async createBlankBrowserWindow(): Promise<void> {
-    await this.request({
-      protocol_version: NATIVE_PROTOCOL_VERSION,
-      request_id: requestId(),
-      type: "browser.window.blank.create",
-    });
+  /**
+   * Ask the native host to create Zen's independent blank window. A plain
+   * Firefox process is the only condition treated as unsupported. Any other
+   * error remains an error so restore never falls through to browser.windows
+   * creation on a Zen process after a transient native failure.
+   */
+  async createBlankBrowserWindow(): Promise<BlankBrowserWindowResult> {
+    try {
+      await this.request({
+        protocol_version: NATIVE_PROTOCOL_VERSION,
+        request_id: requestId(),
+        type: "browser.window.blank.create",
+      });
+      return "created";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLocaleLowerCase("en-US").includes(ZEN_NOT_RUNNING)) {
+        return "unsupported";
+      }
+      throw error;
+    }
   }
 
   private async ping(): Promise<NativeResponse> {
