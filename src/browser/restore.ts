@@ -7,7 +7,6 @@ import {
   isDisposableBootstrapTabs,
   isPortableTabGroup,
   restorableUrl,
-  savedTabsMatchLiveTabs,
   savedWindowSimilarity,
 } from "./model";
 
@@ -52,7 +51,7 @@ interface NewWindowObservation {
 const NEW_WINDOW_SETTLE_MS = 300;
 const NATIVE_BLANK_WINDOW_TIMEOUT_MS = 7_000;
 const NATIVE_BLANK_WINDOW_POLL_MS = 100;
-const NATIVE_BLANK_WINDOW_STABLE_MS = 1_000;
+const NATIVE_BLANK_WINDOW_STABLE_MS = 1_500;
 const NORMAL_GEOMETRY_SETTLE_MS = 180;
 const NORMAL_GEOMETRY_RETRIES = 5;
 const NORMAL_GEOMETRY_TOLERANCE = 8;
@@ -212,10 +211,6 @@ function liveTabs(current: browser.windows.Window): ComparableLiveTab[] {
   return (current.tabs ?? []).map(comparableLiveTab);
 }
 
-function windowAlreadyContainsSnapshot(saved: BrowserWindowSnapshot, current: browser.windows.Window): boolean {
-  return savedTabsMatchLiveTabs(saved, liveTabs(current));
-}
-
 function disposableBootstrapWindow(current: browser.windows.Window): boolean {
   return isDisposableBootstrapTabs(liveTabs(current));
 }
@@ -331,20 +326,13 @@ async function reuseSimilarWindow(
   report: RestoreReport,
 ): Promise<number> {
   if (match.window.id === undefined) throw new Error("Firefox returned an existing window without an ID");
-  const windowId = match.window.id;
-
-  await restoreGeometry(windowId, saved).catch((error) => {
-    report.warnings.push(
-      `Could not reconcile geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });
 
   report.reused_windows += 1;
   report.reused_tabs += match.overlap;
   report.warnings.push(
-    `Reused ${saved.key} from strong tab overlap (${match.overlap}/${match.savedRelevant} saved restorable tabs, ${match.liveRelevant} live restorable tabs). Live tab differences were left untouched to avoid duplicating or deleting user state.`,
+    `Reused ${saved.key} from strong tab overlap (${match.overlap}/${match.savedRelevant} saved restorable tabs, ${match.liveRelevant} live restorable tabs). Because the live window has changed since capture, Context Capsule left its tabs, active tab, groups, state, size, and position untouched rather than risk mutating the wrong Zen window.`,
   );
-  return windowId;
+  return match.window.id;
 }
 
 async function populateWindow(
@@ -414,6 +402,13 @@ async function waitForStableNewDisposableWindow(
       if (window.id !== undefined) observedNewIds.add(window.id);
     }
 
+    if (observedNewIds.size > 1) {
+      stableId = undefined;
+      stableSince = 0;
+      await delay(NATIVE_BLANK_WINDOW_POLL_MS);
+      continue;
+    }
+
     const candidate = fresh.find(disposableBootstrapWindow);
     if (candidate?.id !== undefined) {
       transientDisposableIds.add(candidate.id);
@@ -438,19 +433,18 @@ async function cleanupUnsafeNativeWindows(
   observation: NewWindowObservation,
   beforeWindows: browser.windows.Window[],
 ): Promise<number> {
-  let closed = 0;
-  for (const id of observation.observedNewIds) {
-    const current = await browser.windows.get(id, { populate: true }).catch(() => undefined);
-    if (!current) continue;
+  if (observation.observedNewIds.size !== 1) return 0;
 
-    const wasTransientDisposable = observation.transientDisposableIds.has(id);
-    const mirrorsExisting = beforeWindows.some((before) => liveWindowTopologiesMatch(before, current));
-    if (!wasTransientDisposable && !mirrorsExisting) continue;
+  const [id] = observation.observedNewIds;
+  if (id === undefined) return 0;
+  const current = await browser.windows.get(id, { populate: true }).catch(() => undefined);
+  if (!current) return 0;
 
-    const removed = await browser.windows.remove(id).then(() => true).catch(() => false);
-    if (removed) closed += 1;
-  }
-  return closed;
+  const wasTransientDisposable = observation.transientDisposableIds.has(id);
+  const mirrorsExisting = beforeWindows.some((before) => liveWindowTopologiesMatch(before, current));
+  if (!wasTransientDisposable && !mirrorsExisting) return 0;
+
+  return browser.windows.remove(id).then(() => 1).catch(() => 0);
 }
 
 /**
@@ -486,23 +480,24 @@ async function tryCreateNativeBlankWindow(
   if (blank?.id === undefined) {
     const closed = await cleanupUnsafeNativeWindows(observation, beforeWindows);
     report.warnings.push(
-      `Zen did not produce a stable isolated blank window for ${saved.key}. Context Capsule refused to inject saved tabs into a synchronized/mirrored window${closed > 0 ? ` and closed ${closed} unsafe window(s) created by the attempt` : ""}. Existing browser state was left untouched.`,
+      `Zen did not produce one stable isolated blank window for ${saved.key}. Context Capsule refused to inject saved tabs into a synchronized, mirrored, or ambiguous new window${closed > 0 ? " and closed the single unsafe window created by the attempt" : ""}. Existing browser state was left untouched.`,
     );
     return undefined;
   }
 
   const confirmed = await browser.windows.get(blank.id, { populate: true }).catch(() => undefined);
-  if (!confirmed || !disposableBootstrapWindow(confirmed)) {
+  const confirmedId = confirmed?.id;
+  if (confirmedId === undefined || !confirmed || !disposableBootstrapWindow(confirmed)) {
     const closed = await cleanupUnsafeNativeWindows(observation, beforeWindows);
     report.warnings.push(
-      `Zen changed the new blank window before ${saved.key} could be populated. Context Capsule aborted the restore${closed > 0 ? ` and closed ${closed} unsafe window(s)` : ""} rather than risk changing an existing synchronized Space.`,
+      `Zen changed the new blank window before ${saved.key} could be populated. Context Capsule aborted the restore${closed > 0 ? " and closed the single unsafe window" : ""} rather than risk changing an existing synchronized Space.`,
     );
     return undefined;
   }
 
-  await populateWindow(confirmed.id!, confirmed.tabs?.[0]?.id, saved, report);
+  await populateWindow(confirmedId, confirmed.tabs?.[0]?.id, saved, report);
   report.created_windows += 1;
-  return confirmed.id;
+  return confirmedId;
 }
 
 async function createStandardFirefoxWindow(
