@@ -217,6 +217,13 @@ assert(
   "one extra live tab must not make an otherwise strongly matching large Zen window look missing",
 );
 assert(
+  savedWindowSimilarity(savedManyTabs, [
+    { index: 0, url: "https://www.youtube.com/", pinned: true },
+    { index: 1, url: "https://www.messenger.com/t/example", pinned: true },
+  ]).score === 0,
+  "shared pinned Zen Essentials alone must never be enough to claim a saved multi-tab window",
+);
+assert(
   savedWindowSimilarity(savedChatGptOnly, liveLargeWindowContainingChatGpt).score === 0,
   "a ChatGPT-only saved window must never match a many-tab live window merely because that window also contains ChatGPT",
 );
