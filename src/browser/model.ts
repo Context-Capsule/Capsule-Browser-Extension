@@ -177,7 +177,8 @@ function multisetOverlap(left: string[], right: string[]): number {
  * They cannot be recreated and Firefox-derived browsers may expose them
  * differently between capture and restore. Single-tab windows remain strict so
  * a saved ChatGPT-only window can never match a large window that merely happens
- * to contain the same ChatGPT tab.
+ * to contain the same ChatGPT tab. Pinned tabs can be shared Zen Essentials, so
+ * fuzzy matching also requires independent evidence from unpinned tabs.
  */
 export function savedWindowSimilarity(
   saved: BrowserWindowSnapshot,
@@ -221,15 +222,17 @@ export function savedWindowSimilarity(
   const liveUnpinnedIds = liveRelevantTabs
     .filter(tab => !tab.pinned)
     .map(tab => liveTabIdentity(tab)!);
+  if (savedUnpinnedIds.length === 0) return empty;
+
   const unpinnedOverlap = multisetOverlap(savedUnpinnedIds, liveUnpinnedIds);
+  const requiredUnpinnedOverlap = Math.min(2, savedUnpinnedIds.length);
   const savedCoverage = overlap / savedIds.length;
   const liveCoverage = overlap / liveIds.length;
-  const unpinnedCoverage = savedUnpinnedIds.length === 0
-    ? savedCoverage
-    : unpinnedOverlap / savedUnpinnedIds.length;
+  const unpinnedCoverage = unpinnedOverlap / savedUnpinnedIds.length;
 
   if (
     overlap < 2
+    || unpinnedOverlap < requiredUnpinnedOverlap
     || savedCoverage < 0.6
     || liveCoverage < 0.45
     || unpinnedCoverage < 0.6
