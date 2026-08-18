@@ -124,6 +124,9 @@ function describeGeometry(window: Pick<browser.windows.Window, "left" | "top" | 
 }
 
 async function restoreNormalGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
+  // Firefox does not allow non-normal state and explicit geometry in the same
+  // update. Zen can also re-layout a newborn native window shortly after it is
+  // created, so normalize first and verify the saved rectangle until it sticks.
   await browser.windows.update(windowId, { state: "normal" });
   await delay(NORMAL_GEOMETRY_SETTLE_MS);
 
@@ -172,6 +175,8 @@ async function restoreGroups(
   }
 
   for (const group of saved.groups) {
+    // Anonymous group identifiers can also represent Zen-specific relationships
+    // such as split views, so only named/portable groups are synthesized.
     if (!isPortableTabGroup(group)) continue;
 
     const tabIds = saved.tabs
@@ -356,6 +361,8 @@ async function populateWindow(
     }
   }
 
+  // Never remove a startup tab until at least one saved tab was created. A
+  // partial restore failure must not leave an empty browser window behind.
   if (bootstrapTabId !== undefined && restoredByIndex.size > 0) {
     await browser.tabs.remove(bootstrapTabId).catch(() => undefined);
   }
@@ -402,6 +409,8 @@ async function waitForStableNewDisposableWindow(
       if (window.id !== undefined) observedNewIds.add(window.id);
     }
 
+    // If more than one window appeared during this native attempt, attribution
+    // is ambiguous. Do not choose or mutate either one.
     if (observedNewIds.size > 1) {
       stableId = undefined;
       stableSince = 0;
@@ -433,16 +442,20 @@ async function cleanupUnsafeNativeWindows(
   observation: NewWindowObservation,
   beforeWindows: browser.windows.Window[],
 ): Promise<number> {
+  // We cannot map a Firefox window ID to the native HWND that --blank-window
+  // created. Cleanup therefore happens only when attribution is unusually
+  // strong: exactly one new window appeared, it was first observed as the
+  // disposable native candidate, and it later became an exact mirror of a
+  // window that existed before the attempt. Otherwise fail closed and leave it.
   if (observation.observedNewIds.size !== 1) return 0;
 
   const [id] = observation.observedNewIds;
-  if (id === undefined) return 0;
+  if (id === undefined || !observation.transientDisposableIds.has(id)) return 0;
   const current = await browser.windows.get(id, { populate: true }).catch(() => undefined);
   if (!current) return 0;
 
-  const wasTransientDisposable = observation.transientDisposableIds.has(id);
   const mirrorsExisting = beforeWindows.some((before) => liveWindowTopologiesMatch(before, current));
-  if (!wasTransientDisposable && !mirrorsExisting) return 0;
+  if (!mirrorsExisting) return 0;
 
   return browser.windows.remove(id).then(() => 1).catch(() => 0);
 }
@@ -480,17 +493,19 @@ async function tryCreateNativeBlankWindow(
   if (blank?.id === undefined) {
     const closed = await cleanupUnsafeNativeWindows(observation, beforeWindows);
     report.warnings.push(
-      `Zen did not produce one stable isolated blank window for ${saved.key}. Context Capsule refused to inject saved tabs into a synchronized, mirrored, or ambiguous new window${closed > 0 ? " and closed the single unsafe window created by the attempt" : ""}. Existing browser state was left untouched.`,
+      `Zen did not produce one stable isolated blank window for ${saved.key}. Context Capsule refused to inject saved tabs into a synchronized, mirrored, or ambiguous new window${closed > 0 ? " and closed the single attributable mirrored window created by the attempt" : ""}. Existing browser state was left untouched.`,
     );
     return undefined;
   }
 
+  // Re-read immediately before mutation. A candidate that was blank during the
+  // stability interval can still have been changed by Zen Window Sync.
   const confirmed = await browser.windows.get(blank.id, { populate: true }).catch(() => undefined);
   const confirmedId = confirmed?.id;
   if (confirmedId === undefined || !confirmed || !disposableBootstrapWindow(confirmed)) {
     const closed = await cleanupUnsafeNativeWindows(observation, beforeWindows);
     report.warnings.push(
-      `Zen changed the new blank window before ${saved.key} could be populated. Context Capsule aborted the restore${closed > 0 ? " and closed the single unsafe window" : ""} rather than risk changing an existing synchronized Space.`,
+      `Zen changed the new blank window before ${saved.key} could be populated. Context Capsule aborted the restore${closed > 0 ? " and closed the single attributable mirrored window" : ""} rather than risk changing an existing synchronized Space.`,
     );
     return undefined;
   }
@@ -547,6 +562,10 @@ export async function restoreFirefoxSnapshot(
 
   const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
     .filter((window) => !window.incognito);
+
+  // Match all already-open windows first, before creating anything. This avoids
+  // a newly created Zen window competing with a saved window that was already
+  // satisfied when restore began.
   const existingMatches = assignExistingWindows(snapshot.windows, currentWindows);
   const reservedWindowIds = new Set(
     [...existingMatches.values()]
