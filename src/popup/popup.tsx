@@ -101,7 +101,8 @@ function Popup(): React.JSX.Element {
         bend: 0.26,
         frost: 8,
         sheen: 0,
-        glow: 0.1,
+        glow: 0,
+        specular: 0,
       }}
     >
       <main>
