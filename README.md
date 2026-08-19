@@ -59,7 +59,7 @@ The CLI native host bounds and rotates these logs. Logging is fail-open: inabili
 7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Missing browser resources are restored conservatively; already-satisfied windows are reused instead of duplicated.
 8. Inspect `firefox.log` if a capture or restore is partial or fails.
 
-For a **cold-browser** test, use a persistently installed Context Capsule extension before saving the capsule. A capsule saved by a temporary development install now records that installation type so the CLI can reject an impossible cold restore early instead of launching an empty Zen window and waiting for an adapter that cannot return.
+For a **cold-browser** test, use a persistently installed Context Capsule extension. The live adapter now reports its installation type in the popup/logs, while Capsule-CLI independently requires a genuinely new post-launch adapter heartbeat before sending a cold semantic restore request. If a temporary development add-on disappeared with the browser process, the CLI therefore reports that condition instead of blindly waiting for an adapter that cannot return.
 
 ## Restore safety
 
