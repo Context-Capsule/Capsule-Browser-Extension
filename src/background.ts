@@ -103,12 +103,12 @@ async function syncSnapshot(reason: SyncReason = "automatic"): Promise<Extension
   return status();
 }
 
-function scheduleSync(delay = 500): void {
+function scheduleSync(delay = 500, reason: SyncReason = "automatic"): void {
   if (restoring) return;
   if (syncTimer) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     syncTimer = undefined;
-    void syncSnapshot("automatic");
+    void syncSnapshot(reason);
   }, delay);
 }
 
@@ -239,6 +239,6 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
 }
 
 native.connect();
-void syncSnapshot("startup");
+scheduleSync(100, "startup");
 setInterval(() => scheduleSync(0), 30_000);
 setInterval(() => void pollNativeRestore(), 1_000);
