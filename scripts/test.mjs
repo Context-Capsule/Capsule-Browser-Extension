@@ -3,6 +3,7 @@ import { build } from "esbuild";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { staticFiles } from "./static-files.mjs";
+import { assertAcceptedLintReport } from "./lint.mjs";
 import {
   browserDisplayName,
   parseRegistryExecutable,
@@ -59,11 +60,14 @@ assert(logo.isFile());
 assert(logo.size > 0);
 const logoBytes = await readFile(logoPath);
 assert.equal(logoBytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+const logoWidth = logoBytes.readUInt32BE(16);
+const logoHeight = logoBytes.readUInt32BE(20);
+assert(logoWidth > 0 && logoHeight > 0, "PNG IHDR dimensions must be valid");
 assert(staticFiles.some(([source, destination]) => source === logoPath && destination === "dist/popup/capsule-bgless.png"), "development/build static asset list must include the backgroundless logo");
 assert(!staticFiles.some(([source]) => source.endsWith("context-capsule-logo.png")), "the retired logo must not be copied into the production bundle");
 
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
-assert.equal(manifest.icons["900"], "popup/capsule-bgless.png");
+assert.equal(manifest.icons[String(logoWidth)], "popup/capsule-bgless.png", "manifest icon size key must match the PNG width reported to Firefox");
 assert.equal(manifest.action.default_icon, "popup/capsule-bgless.png");
 
 const popupHtml = await readFile("src/popup/popup.html", "utf8");
@@ -87,6 +91,40 @@ const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 assert.equal(packageJson.dependencies["@samasante/liquid-glass"], "0.1.1");
 assert.ok(packageJson.dependencies.react);
 assert.ok(packageJson.dependencies["react-dom"]);
+
+const knownGeneratedWarning = {
+  code: "UNSAFE_VAR_ASSIGNMENT",
+  message: "Unsafe assignment to innerHTML",
+  description: "generated ReactDOM runtime",
+  file: "popup/popup.js",
+};
+assert.doesNotThrow(() => assertAcceptedLintReport({
+  errors: [],
+  notices: [],
+  warnings: [
+    { ...knownGeneratedWarning, line: 156 },
+    { ...knownGeneratedWarning, line: 158 },
+    { ...knownGeneratedWarning, line: 160 },
+  ],
+}), "the exact pinned generated ReactDOM warning set should be accepted");
+assert.throws(() => assertAcceptedLintReport({
+  errors: [],
+  notices: [],
+  warnings: [
+    { ...knownGeneratedWarning, line: 156 },
+    { ...knownGeneratedWarning, line: 158 },
+    { ...knownGeneratedWarning, line: 160 },
+    { code: "ICON_SIZE_INVALID", file: "manifest.json", message: "wrong icon" },
+  ],
+}), /unexpected warnings/, "any unrelated web-ext warning must still fail lint");
+assert.throws(() => assertAcceptedLintReport({
+  errors: [],
+  notices: [],
+  warnings: [
+    { ...knownGeneratedWarning, line: 156 },
+    { ...knownGeneratedWarning, line: 158 },
+  ],
+}), /Expected exactly 3/, "the generated warning count is pinned so dependency changes cannot silently expand the exception");
 
 const productionBuild = spawnSync(process.execPath, ["scripts/build.mjs"], { stdio: "inherit" });
 assert.equal(productionBuild.status, 0, "production build should succeed");
