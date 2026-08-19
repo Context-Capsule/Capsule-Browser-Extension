@@ -87,6 +87,15 @@ assert.match(popupCss, /background:\s*transparent\s*!important/i);
 assert.match(popupCss, /\.liquid-shell/);
 assert.match(popupCss, /\.brand-logo/);
 
+const protocolSource = await readFile("src/native/protocol.ts", "utf8");
+const clientSource = await readFile("src/native/client.ts", "utf8");
+const backgroundSource = await readFile("src/background.ts", "utf8");
+assert.match(protocolSource, /type:\s*["']browser\.log\.append["']/, "native protocol must expose bounded persistent diagnostics");
+assert.match(clientSource, /appendLog\(/, "native client must expose diagnostic append without coupling it to capture state");
+assert.match(backgroundSource, /persistDiagnostic\(/, "background restore/capture lifecycle must emit high-value diagnostics");
+assert.match(backgroundSource, /lastLoggedError/, "repeated automatic capture failures must be deduplicated before persistent logging");
+assert.doesNotMatch(backgroundSource, /persistDiagnostic\([^)]*\.url/s, "persistent diagnostics must not deliberately log browser tab URLs");
+
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 assert.equal(packageJson.dependencies["@samasante/liquid-glass"], "0.1.1");
 assert.ok(packageJson.dependencies.react);
