@@ -1,7 +1,7 @@
 import { captureFirefoxSnapshot } from "./browser/capture";
 import { restoreFirefoxSnapshot } from "./browser/restore";
 import { tabCount, type FirefoxSnapshot, type RestoreReport } from "./browser/model";
-import { NativeClient, type NativeClientStatus } from "./native/client";
+import { NativeClient, type NativeClientStatus, type NativeLogLevel } from "./native/client";
 import type { RestoreRequest } from "./native/protocol";
 
 interface ExtensionStatus {
@@ -21,6 +21,8 @@ type PopupMessage =
   | { type: "capture-now" }
   | { type: "restore-capsule"; capsule_name: string };
 
+type SyncReason = "automatic" | "manual" | "startup";
+
 let latestSnapshot: FirefoxSnapshot | undefined;
 let syncTimer: ReturnType<typeof setTimeout> | undefined;
 let syncing = false;
@@ -30,10 +32,38 @@ let lastSyncUnixMs: number | undefined;
 let lastError: string | undefined;
 let lastRestore: RestoreReport | undefined;
 let lastHandledRestoreRequestId: string | undefined;
+let lastLoggedError: string | undefined;
 
 const native = new NativeClient((status) => {
+  const wasConnected = nativeStatus.connected;
   nativeStatus = status;
+  if (status.connected && !wasConnected) {
+    queueMicrotask(() => persistDiagnostic("info", "Firefox adapter connected to native host"));
+  }
 });
+
+function persistDiagnostic(level: NativeLogLevel, message: string): void {
+  if (!native.currentStatus().connected) return;
+  void native.appendLog(level, message).catch(() => {
+    // Logging must never break capture/restore or trigger another log request.
+  });
+}
+
+function recordError(context: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  lastError = message;
+  const signature = `${context}:${message}`;
+  if (signature !== lastLoggedError) {
+    lastLoggedError = signature;
+    persistDiagnostic("error", `${context}; ${message}`);
+  }
+  return message;
+}
+
+function clearError(): void {
+  lastError = undefined;
+  lastLoggedError = undefined;
+}
 
 function status(): ExtensionStatus {
   const value: ExtensionStatus = {
@@ -50,7 +80,7 @@ function status(): ExtensionStatus {
   return value;
 }
 
-async function syncSnapshot(): Promise<ExtensionStatus> {
+async function syncSnapshot(reason: SyncReason = "automatic"): Promise<ExtensionStatus> {
   if (syncing || restoring) return status();
   syncing = true;
   try {
@@ -58,9 +88,15 @@ async function syncSnapshot(): Promise<ExtensionStatus> {
     latestSnapshot = snapshot;
     await native.updateState(snapshot);
     lastSyncUnixMs = Date.now();
-    lastError = undefined;
+    clearError();
+    if (reason !== "automatic") {
+      persistDiagnostic(
+        "info",
+        `Firefox semantic capture completed; reason=${reason} windows=${snapshot.windows.length} tabs=${tabCount(snapshot)} private_skipped=${snapshot.skipped_private_windows}`,
+      );
+    }
   } catch (error) {
-    lastError = error instanceof Error ? error.message : String(error);
+    recordError(`Firefox semantic capture failed; reason=${reason}`, error);
   } finally {
     syncing = false;
   }
@@ -72,7 +108,7 @@ function scheduleSync(delay = 500): void {
   if (syncTimer) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     syncTimer = undefined;
-    void syncSnapshot();
+    void syncSnapshot("automatic");
   }, delay);
 }
 
@@ -82,16 +118,25 @@ function restoreOptions() {
   };
 }
 
+function restoreSummary(report: RestoreReport): string {
+  return `created_windows=${report.created_windows} created_tabs=${report.created_tabs} created_groups=${report.created_groups} reused_windows=${report.reused_windows} reused_tabs=${report.reused_tabs} warnings=${report.warnings.length}`;
+}
+
 async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Enter a capsule name to restore");
   restoring = true;
-  lastError = undefined;
+  clearError();
+  persistDiagnostic("info", "Popup-requested Firefox semantic restore started");
   try {
     const snapshot = await native.getCapsule(trimmed);
     lastRestore = await restoreFirefoxSnapshot(snapshot, restoreOptions());
+    persistDiagnostic(
+      lastRestore.warnings.length > 0 ? "warn" : "info",
+      `Popup-requested Firefox semantic restore completed; ${restoreSummary(lastRestore)}`,
+    );
   } catch (error) {
-    lastError = error instanceof Error ? error.message : String(error);
+    recordError("Popup-requested Firefox semantic restore failed", error);
     throw error;
   } finally {
     restoring = false;
@@ -103,9 +148,13 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
 async function completeNativeRestore(request: RestoreRequest): Promise<void> {
   if (restoring || request.request_id === lastHandledRestoreRequestId) return;
   restoring = true;
-  lastError = undefined;
+  clearError();
   let report: RestoreReport | undefined;
   let restoreError: string | undefined;
+  persistDiagnostic(
+    "info",
+    `CLI-requested Firefox semantic restore started; windows=${request.payload.windows.length} tabs=${tabCount(request.payload)}`,
+  );
 
   try {
     if (request.adapter !== "firefox" || request.schema_version !== 1) {
@@ -113,9 +162,12 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     }
     report = await restoreFirefoxSnapshot(request.payload, restoreOptions());
     lastRestore = report;
+    persistDiagnostic(
+      report.warnings.length > 0 ? "warn" : "info",
+      `CLI-requested Firefox semantic restore applied; ${restoreSummary(report)}`,
+    );
   } catch (error) {
-    restoreError = error instanceof Error ? error.message : String(error);
-    lastError = restoreError;
+    restoreError = recordError("CLI-requested Firefox semantic restore failed", error);
   }
 
   try {
@@ -132,7 +184,7 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     lastSyncUnixMs = Date.now();
     lastHandledRestoreRequestId = request.request_id;
   } catch (completionError) {
-    lastError = completionError instanceof Error ? completionError.message : String(completionError);
+    recordError("Firefox restore completion synchronization failed", completionError);
   } finally {
     restoring = false;
   }
@@ -155,7 +207,7 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     case "status":
       return Promise.resolve(status());
     case "capture-now":
-      return syncSnapshot();
+      return syncSnapshot("manual");
     case "restore-capsule":
       return restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "");
     default:
@@ -187,6 +239,6 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
 }
 
 native.connect();
-scheduleSync(100);
+void syncSnapshot("startup");
 setInterval(() => scheduleSync(0), 30_000);
 setInterval(() => void pollNativeRestore(), 1_000);
