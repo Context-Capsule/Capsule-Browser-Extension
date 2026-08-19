@@ -95,14 +95,27 @@ async function captureWindow(
   return result;
 }
 
+async function extensionInstallType(): Promise<string | undefined> {
+  try {
+    const extension = await browser.management.getSelf();
+    return extension.installType || undefined;
+  } catch {
+    // Installation metadata is diagnostic only. Capture must remain available
+    // if a Firefox-derived browser omits or restricts management.getSelf().
+    return undefined;
+  }
+}
+
 export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
   const extension = browser.runtime.getManifest();
-  const windows = await browser.windows.getAll({ populate: true, windowTypes: ["normal"] });
+  const [windows, installType] = await Promise.all([
+    browser.windows.getAll({ populate: true, windowTypes: ["normal"] }),
+    extensionInstallType(),
+  ]);
   const privateCount = windows.filter((window) => window.incognito).length;
 
   const captured = await Promise.all(windows.map((window, index) => captureWindow(window, index)));
-
-  return {
+  const snapshot: FirefoxSnapshot = {
     schema_version: BROWSER_SNAPSHOT_SCHEMA_VERSION,
     browser: FIREFOX_BROWSER_ID,
     extension_version: extension.version,
@@ -110,4 +123,6 @@ export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
     skipped_private_windows: privateCount,
     windows: captured.filter((window): window is BrowserWindowSnapshot => window !== undefined),
   };
+  if (installType) snapshot.install_type = installType;
+  return snapshot;
 }
