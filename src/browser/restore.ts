@@ -54,6 +54,7 @@ const NATIVE_BLANK_WINDOW_POLL_MS = 100;
 const NATIVE_BLANK_WINDOW_STABLE_MS = 1_500;
 const NORMAL_GEOMETRY_SETTLE_MS = 180;
 const NORMAL_GEOMETRY_RETRIES = 5;
+const NON_NORMAL_GEOMETRY_RETRIES = 3;
 const NORMAL_GEOMETRY_TOLERANCE = 8;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
@@ -119,6 +120,15 @@ export function normalWindowGeometryMatches(
     && numberClose(actual.height, saved.height);
 }
 
+export function savedWindowStateAndMonitorMatch(
+  actual: Pick<browser.windows.Window, "left" | "top" | "state">,
+  saved: Pick<BrowserWindowSnapshot, "left" | "top" | "state">,
+): boolean {
+  return actual.state === saved.state
+    && numberClose(actual.left, saved.left)
+    && numberClose(actual.top, saved.top);
+}
+
 function describeGeometry(window: Pick<browser.windows.Window, "left" | "top" | "width" | "height" | "state">): string {
   return `left=${window.left ?? "?"}, top=${window.top ?? "?"}, width=${window.width ?? "?"}, height=${window.height ?? "?"}, state=${window.state ?? "?"}`;
 }
@@ -151,13 +161,74 @@ async function restoreNormalGeometry(windowId: number, saved: BrowserWindowSnaps
   );
 }
 
+async function stageWindowOnSavedMonitor(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
+  await browser.windows.update(windowId, { state: "normal" });
+  await delay(NORMAL_GEOMETRY_SETTLE_MS);
+
+  const position: Parameters<typeof browser.windows.update>[1] = {};
+  if (saved.left !== undefined) position.left = saved.left;
+  if (saved.top !== undefined) position.top = saved.top;
+  if (Object.keys(position).length === 0) return;
+
+  let last: browser.windows.Window | undefined;
+  for (let attempt = 0; attempt < NORMAL_GEOMETRY_RETRIES; attempt += 1) {
+    await browser.windows.update(windowId, position);
+    await delay(NORMAL_GEOMETRY_SETTLE_MS * (attempt + 1));
+    last = await browser.windows.get(windowId).catch(() => undefined);
+    if (
+      last
+      && (last.state === undefined || last.state === "normal")
+      && numberClose(last.left, saved.left)
+      && numberClose(last.top, saved.top)
+    ) {
+      return;
+    }
+  }
+
+  throw new Error(
+    `window did not move to the saved monitor position after ${NORMAL_GEOMETRY_RETRIES} attempts; saved left=${saved.left ?? "?"}, top=${saved.top ?? "?"}; observed ${last ? describeGeometry(last) : "window unavailable"}`,
+  );
+}
+
+async function restoreNonNormalGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
+  const current = await browser.windows.get(windowId).catch(() => undefined);
+  if (current && savedWindowStateAndMonitorMatch(current, saved)) {
+    return;
+  }
+
+  if (saved.state === "minimized") {
+    await stageWindowOnSavedMonitor(windowId, saved);
+    await browser.windows.update(windowId, { state: "minimized" });
+    return;
+  }
+
+  let last: browser.windows.Window | undefined;
+  for (let attempt = 0; attempt < NON_NORMAL_GEOMETRY_RETRIES; attempt += 1) {
+    // Maximizing/fullscreening chooses the monitor containing the normal window.
+    // Move the newborn Zen window to the saved monitor first, then apply the
+    // non-normal state. Applying `maximized` directly is what caused a saved
+    // screen-1 window to maximize on whichever screen Zen created it on.
+    await stageWindowOnSavedMonitor(windowId, saved);
+    await browser.windows.update(windowId, { state: saved.state });
+    await delay(NORMAL_GEOMETRY_SETTLE_MS * (attempt + 1));
+    last = await browser.windows.get(windowId).catch(() => undefined);
+    if (last && savedWindowStateAndMonitorMatch(last, saved)) {
+      return;
+    }
+  }
+
+  throw new Error(
+    `window did not converge to saved state/monitor after ${NON_NORMAL_GEOMETRY_RETRIES} attempts; saved ${describeGeometry(saved)}; observed ${last ? describeGeometry(last) : "window unavailable"}`,
+  );
+}
+
 async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
   if (saved.state === "normal") {
     await restoreNormalGeometry(windowId, saved);
     return;
   }
 
-  await browser.windows.update(windowId, { state: saved.state });
+  await restoreNonNormalGeometry(windowId, saved);
 }
 
 async function restoreGroups(

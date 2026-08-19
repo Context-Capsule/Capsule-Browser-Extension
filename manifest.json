@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Capture and restore Firefox windows, tabs, tab groups, and containers with Context Capsule.",
   "icons": {
-    "900": "popup/capsule-bgless.png"
+    "1254": "popup/capsule-bgless.png"
   },
   "browser_specific_settings": {
     "gecko": {

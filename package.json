@@ -12,7 +12,7 @@
     "dev:isolated": "node scripts/dev-browser.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
-    "lint": "pnpm build && web-ext lint --source-dir dist --warnings-as-errors",
+    "lint": "pnpm build && node scripts/lint.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm lint",
     "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
   },
