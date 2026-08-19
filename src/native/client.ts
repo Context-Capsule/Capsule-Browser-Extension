@@ -15,6 +15,7 @@ export interface NativeClientStatus {
 }
 
 export type BlankBrowserWindowResult = "created" | "unsupported";
+export type NativeLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 
 type Pending = {
   resolve: (response: NativeResponse) => void;
@@ -48,6 +49,17 @@ export class NativeClient {
 
   currentStatus(): NativeClientStatus {
     return { ...this.status };
+  }
+
+  async appendLog(level: NativeLogLevel, message: string): Promise<void> {
+    if (!message.trim()) return;
+    await this.request({
+      protocol_version: NATIVE_PROTOCOL_VERSION,
+      request_id: requestId(),
+      type: "browser.log.append",
+      log_level: level,
+      log_message: message,
+    });
   }
 
   async updateState(
