@@ -12,7 +12,17 @@ pnpm check
 pnpm dev
 ```
 
-`pnpm dev` builds the extension and launches a temporary Firefox profile through `web-ext`.
+`pnpm dev` watches/builds the extension for loading through `about:debugging`. A temporary development add-on is useful for fast iteration, but Firefox/Zen removes it when the browser fully exits. That means it can test **warm restore** (the browser stays running), but it cannot by itself test **cold-browser restore** after all browser windows/processes have exited.
+
+The popup reports the extension installation type. If it shows the temporary-development warning, do not expect the adapter to survive a full browser restart.
+
+For a persistent-installation artifact:
+
+```bash
+pnpm package
+```
+
+This creates an XPI under `web-ext-artifacts/`. Install/sign that package using a persistent installation method supported by the target Firefox/Zen build. Do not modify the browser installation or profile internals just to bypass extension-signing/security policy.
 
 Before native messaging can connect, build and install the native host from Capsule-CLI:
 
@@ -21,7 +31,7 @@ cargo build --bin capsule-firefox-host
 cargo run --bin capsule-firefox-host -- --install
 ```
 
-Then restart the temporary Firefox instance so it sees the native host registration.
+Then restart/reload the extension so it sees the native host registration.
 
 ## Persistent diagnostics
 
@@ -34,7 +44,7 @@ On Windows:
 %LOCALAPPDATA%\ContextCapsule\logs\firefox.log.1
 ```
 
-Diagnostics include events such as native-host connection, startup/manual capture counts, restore start/completion, changed/reused resource counts, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
+Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
 
 The CLI native host bounds and rotates these logs. Logging is fail-open: inability to write a diagnostic must not make capture or restore fail.
 
@@ -42,12 +52,14 @@ The CLI native host bounds and rotates these logs. Logging is fail-open: inabili
 
 1. Start Firefox/Zen with the extension loaded.
 2. Open several tabs, create a named tab group, pin a tab, and optionally open a second browser window.
-3. Open the Context Capsule toolbar popup. It should report `Connected` and the correct window/tab counts.
+3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
 4. Click **Sync now**.
 5. In Capsule-CLI, run `cargo run -- save firefox-test` and then `cargo run -- show firefox-test --json`; the JSON should contain `snapshot.browsers.firefox`.
 6. Change/close the test tabs.
 7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Missing browser resources are restored conservatively; already-satisfied windows are reused instead of duplicated.
 8. Inspect `firefox.log` if a capture or restore is partial or fails.
+
+For a **cold-browser** test, use a persistently installed Context Capsule extension. The live adapter now reports its installation type in the popup/logs, while Capsule-CLI independently requires a genuinely new post-launch adapter heartbeat before sending a cold semantic restore request. If a temporary development add-on disappeared with the browser process, the CLI therefore reports that condition instead of blindly waiting for an adapter that cannot return.
 
 ## Restore safety
 

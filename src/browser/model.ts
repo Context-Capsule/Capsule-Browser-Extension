@@ -49,6 +49,8 @@ export interface FirefoxSnapshot {
   schema_version: typeof BROWSER_SNAPSHOT_SCHEMA_VERSION;
   browser: typeof FIREFOX_BROWSER_ID;
   extension_version: string;
+  /** Firefox reports "development" for an unpacked temporary development add-on. */
+  install_type?: string;
   captured_at_unix_ms: number;
   skipped_private_windows: number;
   windows: BrowserWindowSnapshot[];

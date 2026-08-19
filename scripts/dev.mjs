@@ -45,4 +45,6 @@ console.log("[Context Capsule] Development watch ready.");
 console.log("[Context Capsule] This command does not launch or modify your Firefox/Zen profile.");
 console.log("[Context Capsule] In your existing browser open about:debugging#/runtime/this-firefox, choose 'Load Temporary Add-on', and select dist/manifest.json once.");
 console.log("[Context Capsule] After source changes are rebuilt, press Reload for Context Capsule in about:debugging.");
+console.warn("[Context Capsule] IMPORTANT: Firefox/Zen removes a temporary about:debugging add-on when the browser fully exits. Warm restore works, but cold-browser restore requires a persistent extension installation.");
+console.log("[Context Capsule] Use 'pnpm package' to build an XPI for a browser-supported persistent installation/signing workflow.");
 console.log("[Context Capsule] Use 'pnpm dev:isolated' only when you explicitly want web-ext to launch an isolated browser profile.");

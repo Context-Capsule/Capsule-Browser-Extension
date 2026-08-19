@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 interface PopupStatus {
   native: { connected: boolean; host_version?: string; last_error?: string };
   last_sync_unix_ms?: number;
+  install_type?: string;
   windows: number;
   tabs: number;
   skipped_private_windows: number;
@@ -28,6 +29,9 @@ async function request<T>(message: unknown): Promise<T> {
 function details(status: PopupStatus): string[] {
   const messages: string[] = [];
   if (status.last_sync_unix_ms) messages.push(`Synced ${new Date(status.last_sync_unix_ms).toLocaleTimeString()}`);
+  if (status.install_type === "development") {
+    messages.push("Temporary development install: a full browser quit unloads this adapter. Cold-browser restore requires a persistent extension installation.");
+  }
   if (status.skipped_private_windows > 0) messages.push(`${status.skipped_private_windows} private window(s) intentionally skipped`);
   if (status.native.host_version) messages.push(`Host ${status.native.host_version}`);
   if (status.last_restore) {
