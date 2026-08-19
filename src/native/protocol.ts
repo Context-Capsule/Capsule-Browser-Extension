@@ -20,6 +20,13 @@ export type NativeRequest =
   | {
       protocol_version: typeof NATIVE_PROTOCOL_VERSION;
       request_id: string;
+      type: "browser.log.append";
+      log_level: "error" | "warn" | "info" | "debug" | "trace";
+      log_message: string;
+    }
+  | {
+      protocol_version: typeof NATIVE_PROTOCOL_VERSION;
+      request_id: string;
       type: "browser.state.update";
       snapshot: FirefoxSnapshot;
       restore_request_id?: string;
