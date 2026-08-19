@@ -8,7 +8,11 @@ import {
   tabCount,
   type FirefoxSnapshot,
 } from "../src/browser/model";
-import { normalWindowGeometryMatches, restoreFirefoxSnapshot } from "../src/browser/restore";
+import {
+  normalWindowGeometryMatches,
+  restoreFirefoxSnapshot,
+  savedWindowStateAndMonitorMatch,
+} from "../src/browser/restore";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -262,6 +266,27 @@ assert(
   ),
   "oversized geometry must not be treated as satisfied",
 );
+assert(
+  savedWindowStateAndMonitorMatch(
+    { left: 0, top: 0, state: "maximized" },
+    savedChatGptOnly,
+  ),
+  "native maximized frame offsets within tolerance should still count as the saved monitor",
+);
+assert(
+  !savedWindowStateAndMonitorMatch(
+    { left: 1913, top: -7, state: "maximized" },
+    savedChatGptOnly,
+  ),
+  "a maximized window on the other monitor must not be treated as correctly restored",
+);
+assert(
+  !savedWindowStateAndMonitorMatch(
+    { left: -7, top: -7, state: "normal" },
+    savedChatGptOnly,
+  ),
+  "correct monitor but wrong state must not count as restored",
+);
 
 const mockWindows: Array<Record<string, any>> = [{
   id: 10,
@@ -355,8 +380,10 @@ const restoreReport = await restoreFirefoxSnapshot(twoWindowRestore, {
       focused: false,
       incognito: false,
       state: "normal",
-      left: 50,
-      top: 50,
+      // Simulate Zen creating the new native window on screen 2 even though
+      // the saved ChatGPT window belongs on screen 1.
+      left: 2050,
+      top: 100,
       width: 800,
       height: 600,
       tabs: [{
@@ -379,9 +406,14 @@ assert(JSON.stringify(mockWindows[0]) === originalManyWindow, "the already-open 
 assert(!windowUpdates.some(update => update.id === 10), "no geometry/state update may target the already-open many-tab window");
 const restoredChatWindow = mockWindow(20);
 assert(restoredChatWindow.state === "maximized", "the newly created ChatGPT window itself must receive the saved maximized state");
+assert(restoredChatWindow.left === -7 && restoredChatWindow.top === -7, "the recreated ChatGPT window must be moved back to the saved monitor before maximizing");
 assert(restoredChatWindow.tabs.length === 1, "the recreated ChatGPT window must contain exactly one tab");
 assert(restoredChatWindow.tabs[0]?.url === "https://chatgpt.com/c/example", "the recreated window must contain the saved ChatGPT tab");
-assert(windowUpdates.some(update => update.id === 20 && update.changes.state === "maximized"), "maximize must target the recreated window ID, not the pre-existing window");
+const chatWindowUpdates = windowUpdates.filter(update => update.id === 20);
+const savedMonitorUpdateIndex = chatWindowUpdates.findIndex(update => update.changes.left === -7 && update.changes.top === -7);
+const maximizeUpdateIndex = chatWindowUpdates.findIndex(update => update.changes.state === "maximized");
+assert(savedMonitorUpdateIndex >= 0, "restore must explicitly move the recreated ChatGPT window onto the saved screen");
+assert(maximizeUpdateIndex > savedMonitorUpdateIndex, "restore must move the window to the saved screen before maximizing it");
 assert(restoreReport.reused_windows === 1, "the already-open many-tab window should be counted as reused");
 assert(restoreReport.created_windows === 1, "only the missing ChatGPT window should be counted as created");
 
