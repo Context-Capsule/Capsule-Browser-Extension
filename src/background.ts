@@ -7,6 +7,7 @@ import type { RestoreRequest } from "./native/protocol";
 interface ExtensionStatus {
   native: NativeClientStatus;
   last_sync_unix_ms?: number;
+  install_type?: string;
   windows: number;
   tabs: number;
   skipped_private_windows: number;
@@ -74,6 +75,7 @@ function status(): ExtensionStatus {
     syncing,
     restoring,
   };
+  if (latestSnapshot?.install_type) value.install_type = latestSnapshot.install_type;
   if (lastSyncUnixMs !== undefined) value.last_sync_unix_ms = lastSyncUnixMs;
   if (lastError) value.last_error = lastError;
   if (lastRestore) value.last_restore = lastRestore;
@@ -92,7 +94,7 @@ async function syncSnapshot(reason: SyncReason = "automatic"): Promise<Extension
     if (reason !== "automatic") {
       persistDiagnostic(
         "info",
-        `Firefox semantic capture completed; reason=${reason} windows=${snapshot.windows.length} tabs=${tabCount(snapshot)} private_skipped=${snapshot.skipped_private_windows}`,
+        `Firefox semantic capture completed; reason=${reason} install_type=${snapshot.install_type ?? "unknown"} windows=${snapshot.windows.length} tabs=${tabCount(snapshot)} private_skipped=${snapshot.skipped_private_windows}`,
       );
     }
   } catch (error) {
