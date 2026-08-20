@@ -55,16 +55,16 @@ The CLI native host bounds and rotates these logs. Logging is fail-open: inabili
 3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
 4. Click **Sync now**.
 5. In Capsule-CLI, run `cargo run -- save firefox-test` and then `cargo run -- show firefox-test --json`; the JSON should contain `snapshot.browsers.firefox`.
-6. Change/close the test tabs.
-7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Missing browser resources are restored conservatively; already-satisfied windows are reused instead of duplicated.
+6. Change/close the test tabs or windows.
+7. Enter `firefox-test` in the extension popup and click **Restore capsule**. The saved browser topology is authoritative: already-exact windows are preserved, a changed live window can be reused as the shell for a missing saved window, and unrelated extra live windows are removed.
 8. Inspect `firefox.log` if a capture or restore is partial or fails.
 
-For a **cold-browser** test, use a persistently installed Context Capsule extension. The live adapter now reports its installation type in the popup/logs, while Capsule-CLI independently requires a genuinely new post-launch adapter heartbeat before sending a cold semantic restore request. If a temporary development add-on disappeared with the browser process, the CLI therefore reports that condition instead of blindly waiting for an adapter that cannot return.
+For a **cold-browser** test, use a persistently installed Context Capsule extension. Capsule-CLI starts Zen in its independent `--blank-window` mode with one disposable `about:newtab` bootstrap page. That ordinary tab wakes WebExtensions/native messaging even when no Zen windows were open, while remaining safe for the adapter to replace with the saved tabs. The actual restore bus request/completion is the authoritative adapter handshake; restore is not gated on an unrelated periodic state-file timestamp.
 
-## Restore safety
+## Restore semantics and safety
+
+The capsule is the target state rather than an additive suggestion. Before reconciliation, the adapter preserves every live window that exactly matches a unique saved window. If saved windows are still missing, one unmatched live window can be selected as a reusable shell using saved-tab identity first and saved geometry second. That shell is reduced to one disposable new tab and repopulated in place. Other unmatched live windows are outside the capsule and are closed. Remaining missing windows use Zen's native independent blank-window path so they do not accidentally clone a synchronized Space.
 
 Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore.
 
-For Zen, existing changed windows are deliberately left untouched when identity is not exact enough to mutate safely. Missing independent windows use the native blank-window path so Zen Window Sync does not clone or corrupt an existing Space. Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied.
-
-Anonymous group relationships are not synthesized as ordinary Firefox groups because Firefox-derived browsers can expose vendor-specific relationships (including split-style state) through anonymous group identifiers.
+Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied. Anonymous group relationships are not synthesized as ordinary Firefox groups because Firefox-derived browsers can expose vendor-specific relationships (including split-style state) through anonymous group identifiers.
