@@ -215,10 +215,10 @@ async function turnWindowIntoBootstrap(windowId: number): Promise<void> {
   if (isDisposableBootstrapTabs(comparableTabs(current))) return;
 
   // Create the safety tab first so deleting unrelated live tabs can never close
-  // the reusable window. The semantic restore immediately replaces this tab.
+  // the reusable window. Omitting the URL asks Firefox/Zen for its ordinary
+  // new-tab page, matching the adapter's existing about:newtab restore path.
   const bootstrap = await browser.tabs.create({
     windowId,
-    url: "about:newtab",
     active: true,
   });
   if (bootstrap.id === undefined) {
