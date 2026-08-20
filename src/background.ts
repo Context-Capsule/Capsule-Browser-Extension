@@ -162,10 +162,42 @@ function geometryDistance(
   return observed > 0 ? distance : 1_000_000;
 }
 
+interface ExactAssignmentSet {
+  savedIndices: Set<number>;
+  liveIds: Set<number>;
+}
+
+function findExactAssignments(
+  snapshot: FirefoxSnapshot,
+  currentWindows: browser.windows.Window[],
+): ExactAssignmentSet {
+  const candidates: Array<{ savedIndex: number; liveId: number; distance: number }> = [];
+  for (const [savedIndex, saved] of snapshot.windows.entries()) {
+    for (const live of currentWindows) {
+      if (live.id === undefined) continue;
+      if (!savedWindowSimilarity(saved, comparableTabs(live)).exact) continue;
+      candidates.push({
+        savedIndex,
+        liveId: live.id,
+        distance: geometryDistance(saved, live),
+      });
+    }
+  }
+  candidates.sort((left, right) => left.distance - right.distance || left.savedIndex - right.savedIndex || left.liveId - right.liveId);
+
+  const savedIndices = new Set<number>();
+  const liveIds = new Set<number>();
+  for (const candidate of candidates) {
+    if (savedIndices.has(candidate.savedIndex) || liveIds.has(candidate.liveId)) continue;
+    savedIndices.add(candidate.savedIndex);
+    liveIds.add(candidate.liveId);
+  }
+  return { savedIndices, liveIds };
+}
+
 interface AuthoritativeShellChoice {
   live: browser.windows.Window;
   savedIndex: number;
-  exact: boolean;
   semanticScore: number;
   geometryDistance: number;
 }
@@ -173,18 +205,20 @@ interface AuthoritativeShellChoice {
 function chooseAuthoritativeShell(
   snapshot: FirefoxSnapshot,
   currentWindows: browser.windows.Window[],
+  savedIndices: number[],
 ): AuthoritativeShellChoice | undefined {
-  if (snapshot.windows.length === 0 || currentWindows.length === 0) return undefined;
+  if (savedIndices.length === 0 || currentWindows.length === 0) return undefined;
 
   let best: AuthoritativeShellChoice | undefined;
   for (const live of currentWindows) {
     if (live.id === undefined) continue;
-    for (const [savedIndex, saved] of snapshot.windows.entries()) {
+    for (const savedIndex of savedIndices) {
+      const saved = snapshot.windows[savedIndex];
+      if (!saved) continue;
       const similarity = savedWindowSimilarity(saved, comparableTabs(live));
       const candidate: AuthoritativeShellChoice = {
         live,
         savedIndex,
-        exact: similarity.exact,
         semanticScore: similarity.score,
         geometryDistance: geometryDistance(saved, live),
       };
@@ -240,36 +274,64 @@ async function turnWindowIntoBootstrap(windowId: number): Promise<void> {
 
 /**
  * Context Capsule restore is authoritative: the saved browser topology is the
- * target state, not an additive suggestion. Keep at most one pre-existing Zen
- * window as a shell, rebuild it when necessary, and close other live windows so
- * they cannot survive as stale third/fourth windows beside the capsule.
+ * target state, not an additive suggestion.
  *
- * The best shell is selected by saved-tab identity first and saved geometry
- * second. If it already exactly matches its saved window, preserve it intact.
- * Otherwise reduce it to one about:newtab and let the normal restore engine
- * repopulate that same HWND. Remaining saved windows are created through Zen's
- * independent native blank-window path.
+ * First preserve every live window that already exactly satisfies a unique
+ * saved window. Among the remaining live windows, keep at most one as a shell
+ * for one remaining saved window; choose by saved-tab identity first and saved
+ * geometry second. Reduce that shell to one disposable new tab and let the
+ * normal restore engine repopulate the same HWND. Other unmatched live windows
+ * are outside the capsule and are closed. Missing saved windows are then created
+ * through Zen's independent native blank-window path.
  */
 async function prepareAuthoritativeRestore(snapshot: FirefoxSnapshot): Promise<FirefoxSnapshot> {
   const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
     .filter((window) => !window.incognito && window.id !== undefined);
   if (currentWindows.length === 0 || snapshot.windows.length === 0) return snapshot;
 
-  const choice = chooseAuthoritativeShell(snapshot, currentWindows);
+  const exact = findExactAssignments(snapshot, currentWindows);
+  const remainingSavedIndices = snapshot.windows
+    .map((_, index) => index)
+    .filter((index) => !exact.savedIndices.has(index));
+  const unmatchedLive = currentWindows.filter((window) => window.id !== undefined && !exact.liveIds.has(window.id));
+
+  // If every saved window is already exact, restoration should be a no-op apart
+  // from removing genuinely extra live windows that are not represented by the
+  // capsule.
+  if (remainingSavedIndices.length === 0) {
+    for (const window of unmatchedLive) {
+      if (window.id !== undefined) await browser.windows.remove(window.id);
+    }
+    persistDiagnostic(
+      "info",
+      `Authoritative Zen restore already satisfied; exact_windows=${exact.savedIndices.size} removed_extra_windows=${unmatchedLive.length}`,
+    );
+    return snapshot;
+  }
+
+  // No unmatched live shell is available. Leave exact windows untouched and let
+  // the normal restore engine create every remaining saved window.
+  if (unmatchedLive.length === 0) {
+    persistDiagnostic(
+      "info",
+      `Authoritative Zen restore preserving ${exact.savedIndices.size} exact window(s); ${remainingSavedIndices.length} saved window(s) remain to create`,
+    );
+    return snapshot;
+  }
+
+  const choice = chooseAuthoritativeShell(snapshot, unmatchedLive, remainingSavedIndices);
   if (!choice || choice.live.id === undefined) return snapshot;
   const shellId = choice.live.id;
 
-  // One existing window is enough to keep Zen + the extension alive. Extra live
-  // windows are outside the capsule and must not remain after an exact restore.
-  for (const window of currentWindows) {
+  for (const window of unmatchedLive) {
     if (window.id === undefined || window.id === shellId) continue;
     await browser.windows.remove(window.id);
   }
+  await turnWindowIntoBootstrap(shellId);
 
-  if (!choice.exact) {
-    await turnWindowIntoBootstrap(shellId);
-  }
-
+  // Put the shell's saved target first. The restore engine reserves all exact
+  // windows before it looks for disposable bootstrap windows, so moving this
+  // missing saved target to the front cannot steal an already-satisfied window.
   const windows = [...snapshot.windows];
   if (choice.savedIndex !== 0) {
     const [matched] = windows.splice(choice.savedIndex, 1);
@@ -278,7 +340,7 @@ async function prepareAuthoritativeRestore(snapshot: FirefoxSnapshot): Promise<F
 
   persistDiagnostic(
     "info",
-    `Authoritative Zen restore prepared; live_windows=${currentWindows.length} kept_shell=${shellId} exact_shell=${choice.exact} matched_saved_index=${choice.savedIndex} semantic_score=${choice.semanticScore} geometry_distance=${choice.geometryDistance}`,
+    `Authoritative Zen restore prepared; live_windows=${currentWindows.length} exact_windows=${exact.savedIndices.size} kept_shell=${shellId} matched_saved_index=${choice.savedIndex} semantic_score=${choice.semanticScore} geometry_distance=${choice.geometryDistance} removed_extra_windows=${Math.max(0, unmatchedLive.length - 1)}`,
   );
   return { ...snapshot, windows };
 }
