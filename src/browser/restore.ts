@@ -6,6 +6,7 @@ import {
   type RestoreReport,
   isDisposableBootstrapTabs,
   isPortableTabGroup,
+  isRestorableUrl,
   restorableUrl,
   savedWindowSimilarity,
 } from "./model";
@@ -40,6 +41,22 @@ interface ExistingWindowMatch {
   overlap: number;
   savedRelevant: number;
   liveRelevant: number;
+  liveSubset: boolean;
+  weight: number;
+}
+
+interface ReusableTabOverlap {
+  overlap: number;
+  savedRelevant: number;
+  liveRelevant: number;
+  unpinnedOverlap: number;
+  savedUnpinnedRelevant: number;
+  liveSubset: boolean;
+}
+
+interface ExistingTabMap {
+  restoredByIndex: Map<number, browser.tabs.Tab>;
+  reusedTabIds: Set<number>;
 }
 
 interface NewWindowObservation {
@@ -56,6 +73,7 @@ const NORMAL_GEOMETRY_SETTLE_MS = 180;
 const NORMAL_GEOMETRY_RETRIES = 5;
 const NON_NORMAL_GEOMETRY_RETRIES = 3;
 const NORMAL_GEOMETRY_TOLERANCE = 8;
+const WINDOW_REUSE_OVERLAP_WEIGHT = 1_000_000_000_000;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   const root = browser as unknown as {
@@ -134,9 +152,6 @@ function describeGeometry(window: Pick<browser.windows.Window, "left" | "top" | 
 }
 
 async function restoreNormalGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
-  // Firefox does not allow non-normal state and explicit geometry in the same
-  // update. Zen can also re-layout a newborn native window shortly after it is
-  // created, so normalize first and verify the saved rectangle until it sticks.
   await browser.windows.update(windowId, { state: "normal" });
   await delay(NORMAL_GEOMETRY_SETTLE_MS);
 
@@ -192,9 +207,7 @@ async function stageWindowOnSavedMonitor(windowId: number, saved: BrowserWindowS
 
 async function restoreNonNormalGeometry(windowId: number, saved: BrowserWindowSnapshot): Promise<void> {
   const current = await browser.windows.get(windowId).catch(() => undefined);
-  if (current && savedWindowStateAndMonitorMatch(current, saved)) {
-    return;
-  }
+  if (current && savedWindowStateAndMonitorMatch(current, saved)) return;
 
   if (saved.state === "minimized") {
     await stageWindowOnSavedMonitor(windowId, saved);
@@ -204,17 +217,11 @@ async function restoreNonNormalGeometry(windowId: number, saved: BrowserWindowSn
 
   let last: browser.windows.Window | undefined;
   for (let attempt = 0; attempt < NON_NORMAL_GEOMETRY_RETRIES; attempt += 1) {
-    // Maximizing/fullscreening chooses the monitor containing the normal window.
-    // Move the newborn Zen window to the saved monitor first, then apply the
-    // non-normal state. Applying `maximized` directly is what caused a saved
-    // screen-1 window to maximize on whichever screen Zen created it on.
     await stageWindowOnSavedMonitor(windowId, saved);
     await browser.windows.update(windowId, { state: saved.state });
     await delay(NORMAL_GEOMETRY_SETTLE_MS * (attempt + 1));
     last = await browser.windows.get(windowId).catch(() => undefined);
-    if (last && savedWindowStateAndMonitorMatch(last, saved)) {
-      return;
-    }
+    if (last && savedWindowStateAndMonitorMatch(last, saved)) return;
   }
 
   throw new Error(
@@ -227,7 +234,6 @@ async function restoreGeometry(windowId: number, saved: BrowserWindowSnapshot): 
     await restoreNormalGeometry(windowId, saved);
     return;
   }
-
   await restoreNonNormalGeometry(windowId, saved);
 }
 
@@ -246,8 +252,6 @@ async function restoreGroups(
   }
 
   for (const group of saved.groups) {
-    // Anonymous group identifiers can also represent Zen-specific relationships
-    // such as split views, so only named/portable groups are synthesized.
     if (!isPortableTabGroup(group)) continue;
 
     const tabIds = saved.tabs
@@ -305,55 +309,243 @@ function liveWindowTopologiesMatch(left: browser.windows.Window, right: browser.
   });
 }
 
+function semanticTabKey(url: string, cookieStoreId: string | undefined): string {
+  return `${cookieStoreId ?? ""}\u0000${url}`;
+}
+
+function multisetOverlap(left: string[], right: string[]): number {
+  const counts = new Map<string, number>();
+  for (const value of right) counts.set(value, (counts.get(value) ?? 0) + 1);
+
+  let overlap = 0;
+  for (const value of left) {
+    const remaining = counts.get(value) ?? 0;
+    if (remaining <= 0) continue;
+    overlap += 1;
+    if (remaining === 1) counts.delete(value);
+    else counts.set(value, remaining - 1);
+  }
+  return overlap;
+}
+
+function reusableTabOverlap(saved: BrowserWindowSnapshot, current: browser.windows.Window): ReusableTabOverlap {
+  const savedRelevant = saved.tabs.filter((tab) => tab.restorable && isRestorableUrl(tab.url));
+  const liveRelevant = (current.tabs ?? []).filter((tab) => tab.url !== undefined && isRestorableUrl(tab.url));
+
+  const savedKeys = savedRelevant.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id));
+  const liveKeys = liveRelevant.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId));
+  const overlap = multisetOverlap(savedKeys, liveKeys);
+
+  const savedUnpinned = savedRelevant.filter((tab) => !tab.pinned);
+  const liveUnpinned = liveRelevant.filter((tab) => !tab.pinned);
+  const unpinnedOverlap = multisetOverlap(
+    savedUnpinned.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id)),
+    liveUnpinned.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId)),
+  );
+
+  // The user's common restore case is a live window that is literally a subset
+  // of a saved window. Shared pinned Zen Essentials are not sufficient evidence
+  // when the saved window also has ordinary tabs.
+  const liveSubset = liveKeys.length > 0
+    && overlap === liveKeys.length
+    && (savedUnpinned.length === 0 || unpinnedOverlap > 0);
+
+  return {
+    overlap,
+    savedRelevant: savedKeys.length,
+    liveRelevant: liveKeys.length,
+    unpinnedOverlap,
+    savedUnpinnedRelevant: savedUnpinned.length,
+    liveSubset,
+  };
+}
+
+function geometryDistance(saved: BrowserWindowSnapshot, live: browser.windows.Window): number {
+  let distance = 0;
+  let observed = 0;
+  for (const [savedValue, liveValue] of [
+    [saved.left, live.left],
+    [saved.top, live.top],
+    [saved.width, live.width],
+    [saved.height, live.height],
+  ] as const) {
+    if (savedValue === undefined || liveValue === undefined) continue;
+    distance += Math.abs(savedValue - liveValue);
+    observed += 1;
+  }
+  return observed > 0 ? distance : 1_000_000;
+}
+
+function buildExistingWindowMatch(
+  saved: BrowserWindowSnapshot,
+  current: browser.windows.Window,
+): ExistingWindowMatch | undefined {
+  if (current.id === undefined) return undefined;
+
+  const similarity = savedWindowSimilarity(saved, liveTabs(current));
+  const reuse = reusableTabOverlap(saved, current);
+  const strongFuzzyIdentity = similarity.score > 0;
+
+  const savedCoverage = reuse.savedRelevant > 0 ? reuse.overlap / reuse.savedRelevant : (similarity.exact ? 1 : 0);
+  const liveCoverage = reuse.liveRelevant > 0 ? reuse.overlap / reuse.liveRelevant : (similarity.exact ? 1 : 0);
+  const geometryScore = Math.max(0, 1_000_000 - Math.min(1_000_000, geometryDistance(saved, current)));
+  const liveTabCount = current.tabs?.length ?? 0;
+  const shellPreservationScore = Math.max(
+    0,
+    10_000_000 - Math.min(10_000_000, reuse.liveRelevant * 100_000 + liveTabCount * 10_000),
+  );
+
+  // The leading term makes total reusable tab count the global objective. The
+  // smaller terms break ties in favor of exact/subset semantic identity, then
+  // cheap shells (blank/fewer unrelated tabs), and finally saved geometry. A
+  // final +1 keeps even a zero-overlap live window preferable to a dummy slot:
+  // if a real window exists, reuse it before creating another one.
+  const weight = reuse.overlap * WINDOW_REUSE_OVERLAP_WEIGHT
+    + (similarity.exact ? 500_000_000 : 0)
+    + (reuse.liveSubset ? 200_000_000 : 0)
+    + (strongFuzzyIdentity ? 50_000_000 : 0)
+    + Math.round(savedCoverage * 1_000) * 100_000
+    + Math.round(liveCoverage * 1_000) * 100
+    + shellPreservationScore
+    + geometryScore
+    + 1;
+
+  return {
+    window: current,
+    exact: similarity.exact,
+    score: similarity.score,
+    overlap: reuse.overlap,
+    savedRelevant: reuse.savedRelevant,
+    liveRelevant: reuse.liveRelevant,
+    liveSubset: reuse.liveSubset,
+    weight,
+  };
+}
+
+/**
+ * Maximum-weight rectangular assignment (Hungarian algorithm). Each row may
+ * choose one real column or its own zero-weight dummy column. This makes window
+ * reuse a global optimization instead of a greedy first-match decision.
+ */
+export function maximumWeightAssignment(weights: number[][]): Array<number | undefined> {
+  const rowCount = weights.length;
+  if (rowCount === 0) return [];
+  const realColumnCount = weights.reduce((maximum, row) => Math.max(maximum, row.length), 0);
+  if (realColumnCount === 0) return Array<number | undefined>(rowCount).fill(undefined);
+
+  const columnCount = realColumnCount + rowCount;
+  let maximum = 0;
+  for (const row of weights) {
+    for (const weight of row) maximum = Math.max(maximum, weight);
+  }
+
+  const u = Array<number>(rowCount + 1).fill(0);
+  const v = Array<number>(columnCount + 1).fill(0);
+  const p = Array<number>(columnCount + 1).fill(0);
+  const way = Array<number>(columnCount + 1).fill(0);
+
+  for (let i = 1; i <= rowCount; i += 1) {
+    p[0] = i;
+    let j0 = 0;
+    const minv = Array<number>(columnCount + 1).fill(Number.POSITIVE_INFINITY);
+    const used = Array<boolean>(columnCount + 1).fill(false);
+
+    do {
+      used[j0] = true;
+      const i0 = p[j0] ?? 0;
+      let delta = Number.POSITIVE_INFINITY;
+      let j1 = 0;
+
+      for (let j = 1; j <= columnCount; j += 1) {
+        if (used[j]) continue;
+        const weight = j <= realColumnCount ? (weights[i0 - 1]?.[j - 1] ?? 0) : 0;
+        const current = (maximum - weight) - (u[i0] ?? 0) - (v[j] ?? 0);
+        if (current < (minv[j] ?? Number.POSITIVE_INFINITY)) {
+          minv[j] = current;
+          way[j] = j0;
+        }
+        if ((minv[j] ?? Number.POSITIVE_INFINITY) < delta) {
+          delta = minv[j] ?? Number.POSITIVE_INFINITY;
+          j1 = j;
+        }
+      }
+
+      for (let j = 0; j <= columnCount; j += 1) {
+        if (used[j]) {
+          const row = p[j] ?? 0;
+          u[row] = (u[row] ?? 0) + delta;
+          v[j] = (v[j] ?? 0) - delta;
+        } else {
+          minv[j] = (minv[j] ?? Number.POSITIVE_INFINITY) - delta;
+        }
+      }
+      j0 = j1;
+    } while ((p[j0] ?? 0) !== 0);
+
+    do {
+      const j1 = way[j0] ?? 0;
+      p[j0] = p[j1] ?? 0;
+      j0 = j1;
+    } while (j0 !== 0);
+  }
+
+  const result = Array<number | undefined>(rowCount).fill(undefined);
+  for (let j = 1; j <= realColumnCount; j += 1) {
+    const assignedRow = (p[j] ?? 0) - 1;
+    if (assignedRow < 0) continue;
+    const weight = weights[assignedRow]?.[j - 1] ?? 0;
+    if (weight > 0) result[assignedRow] = j - 1;
+  }
+  return result;
+}
+
 function assignExistingWindows(
   savedWindows: BrowserWindowSnapshot[],
   currentWindows: browser.windows.Window[],
 ): Map<number, ExistingWindowMatch> {
-  const candidates: Array<ExistingWindowMatch & { savedIndex: number; windowId: number }> = [];
+  const candidateGrid = savedWindows.map((saved) =>
+    currentWindows.map((current) => buildExistingWindowMatch(saved, current)),
+  );
+  const assignment = maximumWeightAssignment(
+    candidateGrid.map((row) => row.map((candidate) => candidate?.weight ?? 0)),
+  );
 
-  savedWindows.forEach((saved, savedIndex) => {
-    for (const current of currentWindows) {
-      if (current.id === undefined) continue;
-      const similarity = savedWindowSimilarity(saved, liveTabs(current));
-      if (similarity.score <= 0) continue;
-      candidates.push({
-        savedIndex,
-        windowId: current.id,
-        window: current,
-        ...similarity,
-      });
-    }
-  });
-
-  candidates.sort((left, right) =>
-    right.score - left.score
-    || right.overlap - left.overlap
-    || left.savedIndex - right.savedIndex
-    || left.windowId - right.windowId);
-
-  const assignedSaved = new Set<number>();
-  const assignedWindows = new Set<number>();
   const result = new Map<number, ExistingWindowMatch>();
-
-  for (const candidate of candidates) {
-    if (assignedSaved.has(candidate.savedIndex) || assignedWindows.has(candidate.windowId)) continue;
-    assignedSaved.add(candidate.savedIndex);
-    assignedWindows.add(candidate.windowId);
-    result.set(candidate.savedIndex, candidate);
-  }
-
+  assignment.forEach((currentIndex, savedIndex) => {
+    if (currentIndex === undefined) return;
+    const candidate = candidateGrid[savedIndex]?.[currentIndex];
+    if (candidate) result.set(savedIndex, candidate);
+  });
   return result;
 }
 
-function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): Map<number, browser.tabs.Tab> {
-  const result = new Map<number, browser.tabs.Tab>();
-  const currentTabs = [...(current.tabs ?? [])].sort((a, b) => a.index - b.index);
-  const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
-  savedTabs.forEach((savedTab, index) => {
-    const currentTab = currentTabs[index];
-    if (currentTab) result.set(savedTab.index, currentTab);
-  });
-  return result;
+function sameTabSemanticIdentity(saved: BrowserTabSnapshot, live: browser.tabs.Tab): boolean {
+  if (live.url === undefined || live.url !== saved.url) return false;
+  return (live.cookieStoreId ?? undefined) === (saved.cookie_store_id ?? undefined);
+}
+
+function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.Window): ExistingTabMap {
+  const restoredByIndex = new Map<number, browser.tabs.Tab>();
+  const reusedTabIds = new Set<number>();
+  const available = (current.tabs ?? []).filter((tab) => tab.id !== undefined);
+
+  for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
+    const candidates = available
+      .filter((tab) => tab.id !== undefined && !reusedTabIds.has(tab.id) && sameTabSemanticIdentity(savedTab, tab))
+      .sort((left, right) => {
+        const leftPinPenalty = left.pinned === savedTab.pinned ? 0 : 1;
+        const rightPinPenalty = right.pinned === savedTab.pinned ? 0 : 1;
+        return leftPinPenalty - rightPinPenalty
+          || Math.abs(left.index - savedTab.index) - Math.abs(right.index - savedTab.index)
+          || left.index - right.index;
+      });
+    const chosen = candidates[0];
+    if (chosen?.id === undefined) continue;
+    reusedTabIds.add(chosen.id);
+    restoredByIndex.set(savedTab.index, chosen);
+  }
+
+  return { restoredByIndex, reusedTabIds };
 }
 
 async function reconcileTabs(
@@ -363,8 +555,11 @@ async function reconcileTabs(
   for (const savedTab of saved.tabs) {
     const tab = restoredByIndex.get(savedTab.index);
     if (tab?.id === undefined) continue;
-    if (tab.mutedInfo?.muted !== savedTab.muted) {
-      await browser.tabs.update(tab.id, { muted: savedTab.muted }).catch(() => undefined);
+    const changes: Parameters<typeof browser.tabs.update>[1] = {};
+    if (tab.pinned !== savedTab.pinned) changes.pinned = savedTab.pinned;
+    if (tab.mutedInfo?.muted !== savedTab.muted) changes.muted = savedTab.muted;
+    if (Object.keys(changes).length > 0) {
+      await browser.tabs.update(tab.id, changes).catch(() => undefined);
     }
   }
 
@@ -376,39 +571,80 @@ async function reconcileTabs(
   }
 }
 
-async function reuseSatisfiedWindow(
+async function orderRestoredTabs(
   saved: BrowserWindowSnapshot,
-  current: browser.windows.Window,
+  restoredByIndex: Map<number, browser.tabs.Tab>,
+  windowId: number,
+): Promise<void> {
+  let targetIndex = 0;
+  for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
+    const tab = restoredByIndex.get(savedTab.index);
+    if (tab?.id === undefined) continue;
+    await browser.tabs.move(tab.id, { windowId, index: targetIndex }).catch(() => undefined);
+    targetIndex += 1;
+  }
+}
+
+async function reuseAssignedWindow(
+  saved: BrowserWindowSnapshot,
+  match: ExistingWindowMatch,
   report: RestoreReport,
 ): Promise<number> {
-  if (current.id === undefined) throw new Error("Firefox returned an existing window without an ID");
-  const windowId = current.id;
-  const restoredByIndex = mapExistingTabs(saved, current);
+  if (match.window.id === undefined) throw new Error("Firefox returned an existing window without an ID");
+  const windowId = match.window.id;
+  const current = await browser.windows.get(windowId, { populate: true });
+  const { restoredByIndex, reusedTabIds } = mapExistingTabs(saved, current);
+  const originalTabIds = (current.tabs ?? [])
+    .map((tab) => tab.id)
+    .filter((id): id is number => id !== undefined);
+  const reusedCount = restoredByIndex.size;
+
+  for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
+    if (restoredByIndex.has(savedTab.index)) continue;
+    if (!savedTab.restorable) {
+      report.warnings.push(
+        `Could not recreate non-restorable tab '${savedTab.title ?? savedTab.url}' in ${saved.key}; any already-open matching privileged tab would have been reused.`,
+      );
+      continue;
+    }
+
+    try {
+      const restored = await createTab(windowId, savedTab, report.warnings);
+      restoredByIndex.set(savedTab.index, restored);
+      report.created_tabs += 1;
+    } catch (error) {
+      report.warnings.push(
+        `Failed to complete '${savedTab.title ?? savedTab.url}' in reused ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // Only delete live extras once at least one target tab is known to be present.
+  // This keeps a partial creation failure from closing the reusable window.
+  const extraTabIds = originalTabIds.filter((id) => !reusedTabIds.has(id));
+  if (restoredByIndex.size > 0) {
+    for (const id of extraTabIds) {
+      await browser.tabs.remove(id).catch(() => undefined);
+    }
+  } else if (extraTabIds.length > 0) {
+    report.warnings.push(
+      `Context Capsule could not establish any target tab in ${saved.key}; its existing tabs were left untouched instead of risking an empty window.`,
+    );
+  }
+
   await reconcileTabs(saved, restoredByIndex);
+  await orderRestoredTabs(saved, restoredByIndex, windowId);
   await restoreGroups(windowId, saved, restoredByIndex, report);
   await restoreGeometry(windowId, saved).catch((error) => {
     report.warnings.push(
       `Could not reconcile geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
     );
   });
+
   report.reused_windows += 1;
-  report.reused_tabs += restoredByIndex.size;
+  report.reused_tabs += reusedCount;
+
   return windowId;
-}
-
-async function reuseSimilarWindow(
-  saved: BrowserWindowSnapshot,
-  match: ExistingWindowMatch,
-  report: RestoreReport,
-): Promise<number> {
-  if (match.window.id === undefined) throw new Error("Firefox returned an existing window without an ID");
-
-  report.reused_windows += 1;
-  report.reused_tabs += match.overlap;
-  report.warnings.push(
-    `Reused ${saved.key} from strong tab overlap (${match.overlap}/${match.savedRelevant} saved restorable tabs, ${match.liveRelevant} live restorable tabs). Because the live window has changed since capture, Context Capsule left its tabs, active tab, groups, state, size, and position untouched rather than risk mutating the wrong Zen window.`,
-  );
-  return match.window.id;
 }
 
 async function populateWindow(
@@ -432,14 +668,13 @@ async function populateWindow(
     }
   }
 
-  // Never remove a startup tab until at least one saved tab was created. A
-  // partial restore failure must not leave an empty browser window behind.
   if (bootstrapTabId !== undefined && restoredByIndex.size > 0) {
     await browser.tabs.remove(bootstrapTabId).catch(() => undefined);
   }
 
-  await restoreGroups(windowId, saved, restoredByIndex, report);
   await reconcileTabs(saved, restoredByIndex);
+  await orderRestoredTabs(saved, restoredByIndex, windowId);
+  await restoreGroups(windowId, saved, restoredByIndex, report);
   await restoreGeometry(windowId, saved).catch((error) => {
     report.warnings.push(
       `Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
@@ -480,8 +715,6 @@ async function waitForStableNewDisposableWindow(
       if (window.id !== undefined) observedNewIds.add(window.id);
     }
 
-    // If more than one window appeared during this native attempt, attribution
-    // is ambiguous. Do not choose or mutate either one.
     if (observedNewIds.size > 1) {
       stableId = undefined;
       stableSince = 0;
@@ -513,11 +746,6 @@ async function cleanupUnsafeNativeWindows(
   observation: NewWindowObservation,
   beforeWindows: browser.windows.Window[],
 ): Promise<number> {
-  // We cannot map a Firefox window ID to the native HWND that --blank-window
-  // created. Cleanup therefore happens only when attribution is unusually
-  // strong: exactly one new window appeared, it was first observed as the
-  // disposable native candidate, and it later became an exact mirror of a
-  // window that existed before the attempt. Otherwise fail closed and leave it.
   if (observation.observedNewIds.size !== 1) return 0;
 
   const [id] = observation.observedNewIds;
@@ -531,12 +759,6 @@ async function cleanupUnsafeNativeWindows(
   return browser.windows.remove(id).then(() => 1).catch(() => 0);
 }
 
-/**
- * Returns "unsupported" only when the native host explicitly says that the
- * current browser is not Zen. Undefined means a native Zen attempt failed and
- * callers must not fall back to browser.windows.create(), because doing so can
- * mutate a synchronized Zen Space.
- */
 async function tryCreateNativeBlankWindow(
   saved: BrowserWindowSnapshot,
   report: RestoreReport,
@@ -569,8 +791,6 @@ async function tryCreateNativeBlankWindow(
     return undefined;
   }
 
-  // Re-read immediately before mutation. A candidate that was blank during the
-  // stability interval can still have been changed by Zen Window Sync.
   const confirmed = await browser.windows.get(blank.id, { populate: true }).catch(() => undefined);
   const confirmedId = confirmed?.id;
   if (confirmedId === undefined || !confirmed || !disposableBootstrapWindow(confirmed)) {
@@ -634,9 +854,10 @@ export async function restoreFirefoxSnapshot(
   const currentWindows = (await browser.windows.getAll({ populate: true, windowTypes: ["normal"] }))
     .filter((window) => !window.incognito);
 
-  // Match all already-open windows first, before creating anything. This avoids
-  // a newly created Zen window competing with a saved window that was already
-  // satisfied when restore began.
+  // Compute all semantic window candidates before creating anything. The
+  // Hungarian assignment maximizes total already-open tab reuse across the
+  // complete restore, so an early saved window cannot steal a better candidate
+  // from a later one.
   const existingMatches = assignExistingWindows(snapshot.windows, currentWindows);
   const reservedWindowIds = new Set(
     [...existingMatches.values()]
@@ -646,15 +867,13 @@ export async function restoreFirefoxSnapshot(
   const usedWindowIds = new Set<number>();
 
   let focusedWindowId: number | undefined;
+  let restoredWindowCount = 0;
   for (const [savedIndex, savedWindow] of snapshot.windows.entries()) {
     const existing = existingMatches.get(savedIndex);
 
     let id: number | undefined;
     if (existing) {
-      id = existing.exact
-        ? await reuseSatisfiedWindow(savedWindow, existing.window, report)
-        : await reuseSimilarWindow(savedWindow, existing, report);
-      usedWindowIds.add(id);
+      id = await reuseAssignedWindow(savedWindow, existing, report);
     } else {
       const bootstrap = currentWindows.find((window) =>
         window.id !== undefined
@@ -663,15 +882,31 @@ export async function restoreFirefoxSnapshot(
         && disposableBootstrapWindow(window));
       if (bootstrap) {
         id = await reuseBootstrapWindow(savedWindow, bootstrap, report);
-        usedWindowIds.add(id);
       } else {
         id = await createSavedWindow(savedWindow, report, options);
       }
     }
+
     if (id !== undefined) {
       usedWindowIds.add(id);
+      restoredWindowCount += 1;
       if (savedWindow.focused) focusedWindowId = id;
     }
+  }
+
+  // Preserve unrelated windows if any saved window failed. Once the complete
+  // target topology exists, remove original live windows that were not selected
+  // by the global assignment: at that point they are genuinely outside the
+  // authoritative capsule rather than potential recovery candidates.
+  if (snapshot.windows.length > 0 && restoredWindowCount === snapshot.windows.length) {
+    for (const current of currentWindows) {
+      if (current.id === undefined || usedWindowIds.has(current.id)) continue;
+      await browser.windows.remove(current.id).catch(() => undefined);
+    }
+  } else if (currentWindows.some((window) => window.id !== undefined && !usedWindowIds.has(window.id))) {
+    report.warnings.push(
+      "Some saved browser windows could not be restored, so unrelated live windows were preserved instead of being closed during a partial restore.",
+    );
   }
 
   if (focusedWindowId !== undefined) {
