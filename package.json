@@ -1,20 +1,25 @@
 {
   "name": "capsule-firefox-extension",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
-  "description": "Firefox adapter for Context Capsule",
+  "description": "Firefox/Zen and Chrome browser adapter for Context Capsule",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs firefox",
+    "build:firefox": "node scripts/build.mjs firefox",
+    "build:chrome": "node scripts/build.mjs chrome",
+    "build:all": "pnpm build:firefox && pnpm build:chrome",
     "dev": "node scripts/dev.mjs",
     "dev:isolated": "node scripts/dev-browser.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs && node scripts/test-tab-order.mjs && node scripts/test-splits.mjs && node scripts/test-order.mjs",
+    "test:build-targets": "node scripts/test-build-targets.mjs",
     "lint": "pnpm build && node scripts/lint.mjs",
-    "check": "pnpm typecheck && pnpm test && pnpm lint",
-    "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
+    "check": "pnpm typecheck && pnpm test && pnpm lint && pnpm build:chrome && pnpm test:build-targets",
+    "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest",
+    "package:firefox": "pnpm package"
   },
   "packageManager": "pnpm@11.22.0",
   "dependencies": {
