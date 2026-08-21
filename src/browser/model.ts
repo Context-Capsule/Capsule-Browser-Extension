@@ -2,6 +2,7 @@ export const BROWSER_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export const FIREFOX_BROWSER_ID = "firefox" as const;
 
 export type BrowserWindowState = "normal" | "minimized" | "maximized" | "fullscreen";
+export type BrowserSplitOrientation = "vertical" | "horizontal" | "grid";
 export type TabGroupColor =
   | "blue"
   | "cyan"
@@ -12,6 +13,8 @@ export type TabGroupColor =
   | "purple"
   | "red"
   | "yellow";
+
+const SPLIT_GROUP_TITLE_PREFIX = "__context_capsule_split_v1__:";
 
 export interface BrowserTabSnapshot {
   index: number;
@@ -80,6 +83,24 @@ export interface SavedWindowSimilarity {
   liveRelevant: number;
 }
 
+export function splitGroupTitle(orientation: BrowserSplitOrientation): string {
+  return `${SPLIT_GROUP_TITLE_PREFIX}${orientation}`;
+}
+
+export function splitOrientationFromGroup(
+  group: Pick<BrowserTabGroupSnapshot, "title">,
+): BrowserSplitOrientation | undefined {
+  if (!group.title.startsWith(SPLIT_GROUP_TITLE_PREFIX)) return undefined;
+  const orientation = group.title.slice(SPLIT_GROUP_TITLE_PREFIX.length);
+  return orientation === "vertical" || orientation === "horizontal" || orientation === "grid"
+    ? orientation
+    : undefined;
+}
+
+export function isSplitViewGroup(group: Pick<BrowserTabGroupSnapshot, "title">): boolean {
+  return splitOrientationFromGroup(group) !== undefined;
+}
+
 export function savedTabsMatchLiveTabs(saved: BrowserWindowSnapshot, live: ComparableLiveTab[]): boolean {
   const currentTabs = [...live].sort((a, b) => a.index - b.index);
   const savedTabs = [...saved.tabs].sort((a, b) => a.index - b.index);
@@ -109,13 +130,12 @@ export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
 }
 
 /**
- * Firefox exposes ordinary tab groups, but Firefox-derived browsers can also
- * surface vendor-specific relationships through the same groupId field. An
- * anonymous group has no portable identity that lets Context Capsule safely
- * distinguish those cases, so restore it as independent tabs instead.
+ * Named groups are portable through the standard Firefox tabGroups API. Split
+ * relationships deliberately use a private snapshot marker and are restored by
+ * Zen's own split command instead of being synthesized as an ordinary group.
  */
 export function isPortableTabGroup(group: BrowserTabGroupSnapshot): boolean {
-  return group.title.trim().length > 0;
+  return group.title.trim().length > 0 && !isSplitViewGroup(group);
 }
 
 export function tabCount(snapshot: FirefoxSnapshot): number {

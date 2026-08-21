@@ -1,6 +1,6 @@
 # Context Capsule Firefox Extension
 
-Firefox/Zen WebExtension adapter for Context Capsule. It captures normal browser windows, tab URLs/order, pinned and active tabs, portable tab groups, container IDs, discarded/muted state, and browser-window geometry/state. Private windows are intentionally excluded.
+Firefox/Zen WebExtension adapter for Context Capsule. It captures normal browser windows, tab URLs/order, pinned and active tabs, portable tab groups, Zen split-view relationships, container IDs, discarded/muted state, and browser-window geometry/state. Private windows are intentionally excluded.
 
 The extension communicates with the `capsule-firefox-host` native messaging binary from the `Context-Capsule/Capsule-CLI` repository using the host name `com.contextcapsule.host`.
 
@@ -44,27 +44,39 @@ On Windows:
 %LOCALAPPDATA%\ContextCapsule\logs\firefox.log.1
 ```
 
-Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
+Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, final tab-order corrections, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
 
 The CLI native host bounds and rotates these logs. Logging is fail-open: inability to write a diagnostic must not make capture or restore fail.
 
 ## Manual end-to-end test
 
-1. Start Firefox/Zen with the extension loaded.
-2. Open several tabs, create a named tab group, pin a tab, and optionally open a second browser window.
+1. Start Zen with the persistently installed extension and current native host.
+2. Open at least four ordinary tabs in a memorable order, for example `A, B, C, D`. A named Firefox tab group may be included to exercise block-aware ordering.
 3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
 4. Click **Sync now**.
-5. In Capsule-CLI, run `cargo run -- save firefox-test` and then `cargo run -- show firefox-test --json`; the JSON should contain `snapshot.browsers.firefox`.
-6. Change/close the test tabs.
-7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Missing browser resources are restored conservatively; already-satisfied windows are reused instead of duplicated.
-8. Inspect `firefox.log` if a capture or restore is partial or fails.
+5. In Capsule-CLI, run `cargo run -- save order-test1` and then `cargo run -- show order-test1 --json`; the Firefox snapshot should preserve each tab's index.
+6. Deliberately scramble the live tabs, especially the edges: for example change `A, B, C, D` to `B, A, D, C`, or reverse the whole sequence.
+7. Run `cargo run -- restore order-test1`. Context Capsule should globally reuse the best live windows/tabs, complete missing tabs, restore groups and geometry, and then run one final authoritative ordering pass. The ordinary tabs must finish in exactly `A, B, C, D` relative order.
+8. Inspect `firefox.log` if capture or restore is partial. A failed final-order convergence is reported explicitly rather than silently accepted.
 
-For a **cold-browser** test, use a persistently installed Context Capsule extension. The live adapter now reports its installation type in the popup/logs, while Capsule-CLI independently requires a genuinely new post-launch adapter heartbeat before sending a cold semantic restore request. If a temporary development add-on disappeared with the browser process, the CLI therefore reports that condition instead of blindly waiting for an adapter that cannot return.
+For a **cold-browser** test, use a persistently installed Context Capsule extension. Capsule-CLI opens a real bootstrap browser window/tab so WebExtensions and native messaging can start even when no Zen windows were open. The restore bus request/completion is the authoritative adapter handshake; the bootstrap is only startup state and is eligible for reuse by the same global restore planner.
 
-## Restore safety
+## Restore semantics and safety
 
-Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore.
+The capsule is the target state rather than an additive suggestion. Before creating anything, the adapter inspects all live non-private browser windows and computes a global maximum-reuse assignment against all saved windows. The leading objective is the total number of already-open saved tabs that can be retained across the complete restore. Ties favor exact or subset semantic matches, then inexpensive shells with less unrelated state, then saved geometry. A usable live window with no matching tabs is still preferred over creating another window when the saved topology needs a shell.
 
-For Zen, existing changed windows are deliberately left untouched when identity is not exact enough to mutate safely. Missing independent windows use the native blank-window path so Zen Window Sync does not clone or corrupt an existing Space. Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied.
+For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, mute/active state and named tab groups are reconciled, ordinary tabs outside the capsule are removed only after target tabs safely exist, and the saved window geometry/state is restored.
 
-Anonymous group relationships are not synthesized as ordinary Firefox groups because Firefox-derived browsers can expose vendor-specific relationships (including split-style state) through anonymous group identifiers.
+Tab order has an additional final-authority phase after all of those operations. The verifier sorts live tabs by their actual `tab.index`; it never trusts array iteration order. For ordinary ungrouped target tabs, the adapter sends the entire saved tab-ID sequence to one `tabs.move()` call at the first-unpinned boundary, avoiding sequential index-shift races. If groups are present, saved groups are treated as blocks and moved from right to left; real groups use `tabGroups.move()` where possible so their member order and grouping are not destroyed. The result is re-read and compared against the exact saved relative ID sequence, with bounded retries and an explicit warning if the browser refuses to converge.
+
+### Zen split views
+
+Zen split relationships are still captured so a capsule does not lose the information. Automatic split reconstruction is intentionally disabled in the current restore path while the Zen-specific invocation mechanism is investigated. Restore therefore does not select split members or send Zen split shortcuts after the final tab-order phase.
+
+Split markers remain non-portable group metadata and are never synthesized as ordinary named Firefox groups. Tabs that belonged to a saved split are restored as ordinary tabs in their saved relative order for now.
+
+Original live windows outside the assignment are cleaned up only after the complete saved topology has been restored, and only when they contain no pre-existing pinned tabs. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
+
+Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore. If the exact privileged tab is already open in an assigned window, it can be retained in place.
+
+Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied. Named Firefox tab groups remain portable groups; Zen split markers are captured but currently left unapplied during restore.

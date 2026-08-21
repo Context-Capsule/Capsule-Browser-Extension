@@ -6,7 +6,7 @@ import {
   type RestoreRequest,
   requestId,
 } from "./protocol";
-import type { FirefoxSnapshot, RestoreReport } from "../browser/model";
+import type { BrowserSplitOrientation, FirefoxSnapshot, RestoreReport } from "../browser/model";
 
 export interface NativeClientStatus {
   connected: boolean;
@@ -102,12 +102,6 @@ export class NativeClient {
     return response.snapshot;
   }
 
-  /**
-   * Ask the native host to create Zen's independent blank window. A plain
-   * Firefox process is the only condition treated as unsupported. Any other
-   * error remains an error so restore never falls through to browser.windows
-   * creation on a Zen process after a transient native failure.
-   */
   async createBlankBrowserWindow(): Promise<BlankBrowserWindowResult> {
     try {
       await this.request({
@@ -118,10 +112,32 @@ export class NativeClient {
       return "created";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.toLocaleLowerCase("en-US").includes(ZEN_NOT_RUNNING)) {
-        return "unsupported";
-      }
+      if (message.toLocaleLowerCase("en-US").includes(ZEN_NOT_RUNNING)) return "unsupported";
       throw error;
+    }
+  }
+
+  /**
+   * Split invocation deliberately uses a one-shot native-message process rather
+   * than the long-lived adapter port. During development the CLI/native-host
+   * binary is rebuilt in place; an already connected host can therefore remain
+   * an older executable in memory even though the file on disk is current.
+   * A fresh process makes the command path deterministic without disrupting the
+   * persistent state/capture connection.
+   */
+  async invokeZenSplit(orientation: BrowserSplitOrientation): Promise<void> {
+    const request: NativeRequest = {
+      protocol_version: NATIVE_PROTOCOL_VERSION,
+      request_id: requestId(),
+      type: "browser.zen.split.invoke",
+      split_orientation: orientation,
+    };
+    const response = await browser.runtime.sendNativeMessage(
+      NATIVE_HOST_NAME,
+      request,
+    ) as NativeResponse | undefined;
+    if (!response?.ok) {
+      throw new Error(response?.error ?? "Fresh Context Capsule native host rejected the Zen split command");
     }
   }
 

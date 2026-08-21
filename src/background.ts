@@ -1,6 +1,11 @@
 import { captureFirefoxSnapshot } from "./browser/capture";
+import { enforceFinalTabOrder } from "./browser/order";
 import { restoreFirefoxSnapshot } from "./browser/restore";
-import { tabCount, type FirefoxSnapshot, type RestoreReport } from "./browser/model";
+import {
+  tabCount,
+  type FirefoxSnapshot,
+  type RestoreReport,
+} from "./browser/model";
 import { NativeClient, type NativeClientStatus, type NativeLogLevel } from "./native/client";
 import type { RestoreRequest } from "./native/protocol";
 
@@ -34,6 +39,8 @@ let lastError: string | undefined;
 let lastRestore: RestoreReport | undefined;
 let lastHandledRestoreRequestId: string | undefined;
 let lastLoggedError: string | undefined;
+
+const RESTORE_POLL_MS = 350;
 
 const native = new NativeClient((status) => {
   const wasConnected = nativeStatus.connected;
@@ -124,6 +131,35 @@ function restoreSummary(report: RestoreReport): string {
   return `created_windows=${report.created_windows} created_tabs=${report.created_tabs} created_groups=${report.created_groups} reused_windows=${report.reused_windows} reused_tabs=${report.reused_tabs} warnings=${report.warnings.length}`;
 }
 
+async function finalizeTabOrder(snapshot: FirefoxSnapshot, report: RestoreReport): Promise<void> {
+  const ordering = await enforceFinalTabOrder(snapshot);
+  report.warnings.push(...ordering.warnings);
+  if (ordering.correctedWindows > 0 || ordering.warnings.length > 0) {
+    persistDiagnostic(
+      ordering.warnings.length > 0 ? "warn" : "info",
+      `Final browser tab ordering completed; corrected_windows=${ordering.correctedWindows} warnings=${ordering.warnings.length}`,
+    );
+  }
+}
+
+/**
+ * The restore engine owns window planning and resource reconciliation. A final
+ * independent ordering pass runs only after creation, reuse, grouping, active
+ * state, and geometry have finished, so no later semantic browser operation can
+ * silently disturb the saved tab sequence.
+ *
+ * Split restoration is intentionally disabled for now. Capture keeps the split
+ * metadata, but restore does not select tabs or invoke Zen split commands while
+ * that integration is being investigated separately.
+ */
+async function prepareAuthoritativeRestore(snapshot: FirefoxSnapshot): Promise<FirefoxSnapshot> {
+  persistDiagnostic(
+    "info",
+    `Authoritative Zen restore delegated to global reuse planner; saved_windows=${snapshot.windows.length} saved_tabs=${tabCount(snapshot)}`,
+  );
+  return snapshot;
+}
+
 async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Enter a capsule name to restore");
@@ -132,7 +168,9 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   persistDiagnostic("info", "Popup-requested Firefox semantic restore started");
   try {
     const snapshot = await native.getCapsule(trimmed);
-    lastRestore = await restoreFirefoxSnapshot(snapshot, restoreOptions());
+    const prepared = await prepareAuthoritativeRestore(snapshot);
+    lastRestore = await restoreFirefoxSnapshot(prepared, restoreOptions());
+    await finalizeTabOrder(prepared, lastRestore);
     persistDiagnostic(
       lastRestore.warnings.length > 0 ? "warn" : "info",
       `Popup-requested Firefox semantic restore completed; ${restoreSummary(lastRestore)}`,
@@ -162,7 +200,9 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     if (request.adapter !== "firefox" || request.schema_version !== 1) {
       throw new Error("Unsupported Context Capsule Firefox restore request");
     }
-    report = await restoreFirefoxSnapshot(request.payload, restoreOptions());
+    const prepared = await prepareAuthoritativeRestore(request.payload);
+    report = await restoreFirefoxSnapshot(prepared, restoreOptions());
+    await finalizeTabOrder(prepared, report);
     lastRestore = report;
     persistDiagnostic(
       report.warnings.length > 0 ? "warn" : "info",
@@ -243,4 +283,4 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
 native.connect();
 scheduleSync(100, "startup");
 setInterval(() => scheduleSync(0), 30_000);
-setInterval(() => void pollNativeRestore(), 1_000);
+setInterval(() => void pollNativeRestore(), RESTORE_POLL_MS);

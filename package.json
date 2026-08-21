@@ -1,6 +1,6 @@
 {
   "name": "capsule-firefox-extension",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "private": true,
   "description": "Firefox adapter for Context Capsule",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:isolated": "node scripts/dev-browser.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test.mjs",
+    "test": "node scripts/test.mjs && node scripts/test-tab-order.mjs && node scripts/test-splits.mjs && node scripts/test-order.mjs",
     "lint": "pnpm build && node scripts/lint.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm lint",
     "package": "pnpm build && web-ext build --source-dir dist --artifacts-dir web-ext-artifacts --overwrite-dest"
