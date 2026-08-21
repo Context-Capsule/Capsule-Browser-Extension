@@ -27,6 +27,10 @@ interface ExtensionStatus {
   last_restore?: RestoreReport;
 }
 
+interface MessageErrorEnvelope {
+  __context_capsule_error: string;
+}
+
 type PopupMessage =
   | { type: "status" }
   | { type: "capture-now" }
@@ -255,17 +259,27 @@ async function pollNativeRestore(): Promise<void> {
   }
 }
 
-browser.runtime.onMessage.addListener((message: unknown) => {
+function messageError(error: unknown): MessageErrorEnvelope {
+  return {
+    __context_capsule_error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   const request = message as Partial<PopupMessage>;
   switch (request.type) {
     case "status":
-      return Promise.resolve(status());
+      sendResponse(status());
+      return false;
     case "capture-now":
-      return syncSnapshot("manual");
+      void syncSnapshot("manual").then(sendResponse, (error) => sendResponse(messageError(error)));
+      return true;
     case "restore-capsule":
-      return restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "");
+      void restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "")
+        .then(sendResponse, (error) => sendResponse(messageError(error)));
+      return true;
     default:
-      return undefined;
+      return false;
   }
 });
 
