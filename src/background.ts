@@ -1,5 +1,6 @@
 import { captureFirefoxSnapshot } from "./browser/capture";
 import { restoreFirefoxSnapshot } from "./browser/restore";
+import { restoreSavedSplitViews } from "./browser/splits";
 import {
   tabCount,
   type FirefoxSnapshot,
@@ -128,11 +129,23 @@ function restoreSummary(report: RestoreReport): string {
   return `created_windows=${report.created_windows} created_tabs=${report.created_tabs} created_groups=${report.created_groups} reused_windows=${report.reused_windows} reused_tabs=${report.reused_tabs} warnings=${report.warnings.length}`;
 }
 
+async function restoreSemanticTopology(snapshot: FirefoxSnapshot, report: RestoreReport): Promise<void> {
+  const splitResult = await restoreSavedSplitViews(snapshot, (orientation) => native.invokeZenSplit(orientation));
+  report.warnings.push(...splitResult.warnings);
+  if (splitResult.restored > 0 || splitResult.alreadySatisfied > 0 || splitResult.warnings.length > 0) {
+    persistDiagnostic(
+      splitResult.warnings.length > 0 ? "warn" : "info",
+      `Zen split restore completed; restored=${splitResult.restored} already_satisfied=${splitResult.alreadySatisfied} warnings=${splitResult.warnings.length}`,
+    );
+  }
+}
+
 /**
- * The restore engine now owns authoritative window planning. It sees every live
+ * The restore engine owns authoritative window planning. It sees every live
  * non-private window at once, computes a global maximum-reuse assignment, then
- * reconciles the chosen windows in place. Do not close or blank live windows in
- * the background layer before that planner has had a chance to inspect them.
+ * reconciles the chosen windows in place. Split topology is applied only after
+ * those tab/window identities have converged so Zen receives the exact saved
+ * tabs when its own split command is invoked.
  */
 async function prepareAuthoritativeRestore(snapshot: FirefoxSnapshot): Promise<FirefoxSnapshot> {
   persistDiagnostic(
@@ -152,6 +165,7 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
     const snapshot = await native.getCapsule(trimmed);
     const prepared = await prepareAuthoritativeRestore(snapshot);
     lastRestore = await restoreFirefoxSnapshot(prepared, restoreOptions());
+    await restoreSemanticTopology(prepared, lastRestore);
     persistDiagnostic(
       lastRestore.warnings.length > 0 ? "warn" : "info",
       `Popup-requested Firefox semantic restore completed; ${restoreSummary(lastRestore)}`,
@@ -183,6 +197,7 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     }
     const prepared = await prepareAuthoritativeRestore(request.payload);
     report = await restoreFirefoxSnapshot(prepared, restoreOptions());
+    await restoreSemanticTopology(prepared, report);
     lastRestore = report;
     persistDiagnostic(
       report.warnings.length > 0 ? "warn" : "info",
