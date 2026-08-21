@@ -265,23 +265,45 @@ function messageError(error: unknown): MessageErrorEnvelope {
   };
 }
 
-browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-  const request = message as Partial<PopupMessage>;
-  switch (request.type) {
-    case "status":
-      sendResponse(status());
-      return false;
-    case "capture-now":
-      void syncSnapshot("manual").then(sendResponse, (error) => sendResponse(messageError(error)));
-      return true;
-    case "restore-capsule":
-      void restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "")
-        .then(sendResponse, (error) => sendResponse(messageError(error)));
-      return true;
-    default:
-      return false;
-  }
-});
+if (IS_FIREFOX) {
+  // Preserve the already-proven Firefox/Zen message boundary exactly. Firefox
+  // supports promise-returning onMessage listeners, so the existing popup
+  // behavior remains unchanged on the default build target.
+  browser.runtime.onMessage.addListener((message: unknown) => {
+    const request = message as Partial<PopupMessage>;
+    switch (request.type) {
+      case "status":
+        return Promise.resolve(status());
+      case "capture-now":
+        return syncSnapshot("manual");
+      case "restore-capsule":
+        return restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "");
+      default:
+        return undefined;
+    }
+  });
+} else {
+  // Promise-returning runtime.onMessage listeners are only natively supported
+  // by Chrome starting with Chrome 148. The callback form works across MV3
+  // Chrome releases and keeps this build compatible with Chrome 105+.
+  browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    const request = message as Partial<PopupMessage>;
+    switch (request.type) {
+      case "status":
+        sendResponse(status());
+        return false;
+      case "capture-now":
+        void syncSnapshot("manual").then(sendResponse, (error) => sendResponse(messageError(error)));
+        return true;
+      case "restore-capsule":
+        void restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "")
+          .then(sendResponse, (error) => sendResponse(messageError(error)));
+        return true;
+      default:
+        return false;
+    }
+  });
+}
 
 browser.tabs.onCreated.addListener(() => scheduleSync());
 browser.tabs.onRemoved.addListener(() => scheduleSync());
