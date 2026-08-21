@@ -75,7 +75,7 @@ If a saved ordinary tab has the same URL/container as a protected live pinned/Es
 
 This protection is intentionally asymmetric. Context Capsule can preserve an Essential that Zen already has, but a standard WebExtension cannot reliably manufacture a missing Zen Essential from scratch. If an Essential is completely absent at restore time, a newly created saved pinned tab can only be restored as a normal pinned tab through the supported WebExtension API; promoting it into Zen's private Essentials section remains Zen-owned state.
 
-Original live windows outside the assignment are closed only after the complete saved topology has been restored. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
+Original live windows outside the assignment are cleaned up only after the complete saved topology has been restored, and only when they contain no pre-existing pinned tabs. A surplus window containing pinned tabs is preserved with a warning because closing the entire window could otherwise destroy Zen-owned Essential state that the WebExtension cannot distinguish from ordinary pinning. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
 
 Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore. If the exact privileged tab is already open in an assigned window, it can be retained in place.
 
