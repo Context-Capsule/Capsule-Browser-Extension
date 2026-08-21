@@ -149,7 +149,7 @@ let invoked: string[] = [];
 const snapshot: FirefoxSnapshot = {
   schema_version: 1,
   browser: "firefox",
-  extension_version: "0.1.4",
+  extension_version: "0.1.5",
   captured_at_unix_ms: 1,
   skipped_private_windows: 0,
   windows: [{
@@ -193,14 +193,27 @@ const snapshot: FirefoxSnapshot = {
   }],
 };
 
-const restored = await restoreSavedSplitViews(snapshot, async (orientation) => {
-  invoked.push(orientation);
-  assert.deepEqual(highlighted, [0, 1], "both saved split members must be multi-selected before invoking Zen");
+function formMockSplit(): void {
   for (const tab of liveTabs) {
     tab.splitViewId = 77;
     tab.groupId = 88;
   }
   liveGroups = [{ id: 88, title: "" }];
+}
+
+function clearMockSplit(): void {
+  for (const tab of liveTabs) {
+    tab.splitViewId = -1;
+    tab.groupId = -1;
+    tab.highlighted = false;
+  }
+  liveGroups = [];
+}
+
+const restored = await restoreSavedSplitViews(snapshot, async (orientation) => {
+  invoked.push(orientation);
+  assert.deepEqual(highlighted, [0, 1], "both saved split members must be multi-selected before invoking Zen");
+  formMockSplit();
 });
 
 assert.deepEqual(invoked, ["vertical"]);
@@ -209,6 +222,21 @@ assert.equal(restored.restored, 1);
 assert.equal(restored.alreadySatisfied, 0);
 assert.deepEqual(restored.warnings, []);
 assert.deepEqual(liveTabs.map(tab => tab.url), ["https://a.test/", "https://b.test/"], "split restoration must not replace the restored tab objects");
+
+clearMockSplit();
+invoked = [];
+let attempts = 0;
+const retried = await restoreSavedSplitViews(snapshot, async (orientation) => {
+  attempts += 1;
+  invoked.push(orientation);
+  assert.deepEqual(highlighted, [0, 1], `attempt ${attempts} must reassert the exact saved multi-selection`);
+  if (attempts === 2) formMockSplit();
+});
+assert.equal(attempts, 2, "a native no-op must be retried after verification instead of silently succeeding");
+assert.deepEqual(invoked, ["vertical", "vertical"]);
+assert.equal(retried.restored, 1);
+assert.equal(retried.alreadySatisfied, 0);
+assert.deepEqual(retried.warnings, []);
 
 invoked = [];
 const already = await restoreSavedSplitViews(snapshot, async (orientation) => {
