@@ -14,7 +14,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:isolated": "node scripts/dev-browser.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test.mjs && node scripts/test-tab-order.mjs && node scripts/test-splits.mjs && node scripts/test-order.mjs",
+    "test": "node scripts/test.mjs && node scripts/test-tab-order.mjs && node scripts/test-splits.mjs && node scripts/test-order.mjs && node scripts/test-chrome-target.mjs",
     "test:build-targets": "node scripts/test-build-targets.mjs",
     "lint": "pnpm build && node scripts/lint.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm lint && pnpm build:chrome && pnpm test:build-targets",
