@@ -21,6 +21,7 @@ interface SavedWindowMatch {
   window: browser.windows.Window;
   mappedBySavedIndex: Map<number, ExtendedTab>;
   overlap: number;
+  unpinnedOverlap: number;
   weight: number;
 }
 
@@ -36,6 +37,7 @@ export interface FinalTabOrderResult {
 
 const FINAL_ORDER_RETRIES = 3;
 const FINAL_ORDER_SETTLE_MS = 40;
+const WINDOW_UNPINNED_OVERLAP_WEIGHT = 1_000_000_000_000;
 const WINDOW_OVERLAP_WEIGHT = 1_000_000_000;
 const TAB_GROUP_ID_NONE = -1;
 
@@ -45,10 +47,6 @@ function delay(milliseconds: number): Promise<void> {
 
 function tabGroupsApi(): TabGroupsApi | undefined {
   return (browser as unknown as { tabGroups?: TabGroupsApi }).tabGroups;
-}
-
-function semanticTabKey(url: string, cookieStoreId: string | undefined): string {
-  return `${cookieStoreId ?? ""}\u0000${url}`;
 }
 
 function sameSavedAndLiveTab(saved: BrowserTabSnapshot, live: ExtendedTab): boolean {
@@ -114,6 +112,8 @@ function buildWindowMatch(
   const overlap = mappedBySavedIndex.size;
   if (overlap === 0) return undefined;
 
+  const unpinnedOverlap = saved.tabs.reduce((count, tab) =>
+    count + (!tab.pinned && mappedBySavedIndex.has(tab.index) ? 1 : 0), 0);
   const exactCountBonus = overlap === saved.tabs.length && overlap === (live.tabs?.length ?? 0)
     ? 10_000_000
     : 0;
@@ -122,7 +122,14 @@ function buildWindowMatch(
     window: live,
     mappedBySavedIndex,
     overlap,
-    weight: overlap * WINDOW_OVERLAP_WEIGHT + exactCountBonus + geometryBonus,
+    unpinnedOverlap,
+    // Final ordering exists specifically for ordinary tabs. Give their overlap
+    // overwhelming priority so shared Zen pinned/Essential tabs cannot make the
+    // finalizer attach a saved topology to the wrong live window.
+    weight: unpinnedOverlap * WINDOW_UNPINNED_OVERLAP_WEIGHT
+      + overlap * WINDOW_OVERLAP_WEIGHT
+      + exactCountBonus
+      + geometryBonus,
   };
 }
 
@@ -298,13 +305,14 @@ export async function enforceFinalTabOrder(snapshot: FirefoxSnapshot): Promise<F
 
   for (const [savedIndex, saved] of snapshot.windows.entries()) {
     const match = assignment.get(savedIndex);
-    if (!match?.window.id) {
+    const windowId = match?.window.id;
+    if (windowId === undefined) {
       result.warnings.push(`Could not identify the restored live window for final tab ordering in ${saved.key}.`);
       continue;
     }
 
     const desiredIds = desiredUnpinnedIds(saved, match.mappedBySavedIndex);
-    const before = await liveWindowTabs(match.window.id);
+    const before = await liveWindowTabs(windowId);
     if (!before) {
       result.warnings.push(`Restored window ${saved.key} disappeared before final tab ordering.`);
       continue;
@@ -325,7 +333,6 @@ export async function enforceFinalTabOrder(snapshot: FirefoxSnapshot): Promise<F
 
 // Exported for focused regression tests without exposing browser mutation details.
 export const finalOrderTestHelpers = {
-  semanticTabKey,
   exactRelativeOrder,
   buildSavedBlocks,
 };
