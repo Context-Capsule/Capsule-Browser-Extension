@@ -16,7 +16,7 @@ import {
 interface TabGroupsApi {
   query(queryInfo: { windowId?: number }): Promise<Array<{
     id: number;
-    title: string;
+    title?: string;
     color: string;
     collapsed: boolean;
     windowId: number;
@@ -97,10 +97,11 @@ async function captureWindow(
     const key = `group-${groupIndex}`;
     groupKeyById.set(group.id, key);
     const members = tabs.filter(tab => tab.groupId === group.id);
-    const split = isCapturedSplitGroup(group, members);
+    const title = group.title ?? "";
+    const split = isCapturedSplitGroup({ title }, members);
     return {
       key,
-      title: split ? splitGroupTitle(inferSplitOrientation(source, members)) : group.title,
+      title: split ? splitGroupTitle(inferSplitOrientation(source, members)) : title,
       color: group.color as TabGroupColor,
       collapsed: group.collapsed,
     };
