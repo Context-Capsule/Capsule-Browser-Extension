@@ -44,20 +44,20 @@ On Windows:
 %LOCALAPPDATA%\ContextCapsule\logs\firefox.log.1
 ```
 
-Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, split restore results, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
+Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, final tab-order corrections, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
 
 The CLI native host bounds and rotates these logs. Logging is fail-open: inability to write a diagnostic must not make capture or restore fail.
 
 ## Manual end-to-end test
 
 1. Start Zen with the persistently installed extension and current native host.
-2. Open several ordinary tabs and put two of them into a real Zen split view. A left/right split is the primary regression case; horizontal and grid layouts are also represented.
+2. Open at least four ordinary tabs in a memorable order, for example `A, B, C, D`. A named Firefox tab group may be included to exercise block-aware ordering.
 3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
 4. Click **Sync now**.
-5. In Capsule-CLI, run `cargo run -- save split-test1` and then `cargo run -- show split-test1 --json`; the Firefox snapshot should contain the split members linked to the same internal split group marker.
-6. Unsplit those tabs, close one of them, reorder other tabs, or otherwise disturb the saved browser state.
-7. Run `cargo run -- restore split-test1`. Context Capsule should globally reuse the best live windows/tabs, complete missing tabs, restore ordinary tab order, then multi-select the exact saved split members and invoke Zen's own split command. The restore is accepted only if the extension re-queries the tabs and verifies that Zen formed one real split relationship.
-8. Inspect `firefox.log` if capture or restore is partial or a split command is rejected.
+5. In Capsule-CLI, run `cargo run -- save order-test1` and then `cargo run -- show order-test1 --json`; the Firefox snapshot should preserve each tab's index.
+6. Deliberately scramble the live tabs, especially the edges: for example change `A, B, C, D` to `B, A, D, C`, or reverse the whole sequence.
+7. Run `cargo run -- restore order-test1`. Context Capsule should globally reuse the best live windows/tabs, complete missing tabs, restore groups and geometry, and then run one final authoritative ordering pass. The ordinary tabs must finish in exactly `A, B, C, D` relative order.
+8. Inspect `firefox.log` if capture or restore is partial. A failed final-order convergence is reported explicitly rather than silently accepted.
 
 For a **cold-browser** test, use a persistently installed Context Capsule extension. Capsule-CLI opens a real bootstrap browser window/tab so WebExtensions and native messaging can start even when no Zen windows were open. The restore bus request/completion is the authoritative adapter handshake; the bootstrap is only startup state and is eligible for reuse by the same global restore planner.
 
@@ -65,22 +65,18 @@ For a **cold-browser** test, use a persistently installed Context Capsule extens
 
 The capsule is the target state rather than an additive suggestion. Before creating anything, the adapter inspects all live non-private browser windows and computes a global maximum-reuse assignment against all saved windows. The leading objective is the total number of already-open saved tabs that can be retained across the complete restore. Ties favor exact or subset semantic matches, then inexpensive shells with less unrelated state, then saved geometry. A usable live window with no matching tabs is still preferred over creating another window when the saved topology needs a shell.
 
-For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, mute/active state and named tab groups are reconciled, ordinary tabs outside the capsule are removed only after target tabs safely exist, and the saved window geometry/state is restored. Tab ordering is segment-aware and verified/retried after creation and again after group restoration so group operations cannot silently leave the tab sequence scrambled.
+For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, mute/active state and named tab groups are reconciled, ordinary tabs outside the capsule are removed only after target tabs safely exist, and the saved window geometry/state is restored.
+
+Tab order has an additional final-authority phase after all of those operations. The verifier sorts live tabs by their actual `tab.index`; it never trusts array iteration order. For ordinary ungrouped target tabs, the adapter sends the entire saved tab-ID sequence to one `tabs.move()` call at the first-unpinned boundary, avoiding sequential index-shift races. If groups are present, saved groups are treated as blocks and moved from right to left; real groups use `tabGroups.move()` where possible so their member order and grouping are not destroyed. The result is re-read and compared against the exact saved relative ID sequence, with bounded retries and an explicit warning if the browser refuses to converge.
 
 ### Zen split views
 
-Zen split views are not ordinary adjacent tabs. Zen backs a split with browser tab-group state plus its own split-view metadata and commands. Context Capsule therefore records the relationship separately from portable named Firefox groups. The snapshot schema remains version 1 by encoding the split marker through the existing group-key/title fields, which the CLI already persists losslessly.
+Zen split relationships are still captured so a capsule does not lose the information. Automatic split reconstruction is intentionally disabled in the current restore path while the Zen-specific invocation mechanism is investigated. Restore therefore does not select split members or send Zen split shortcuts after the final tab-order phase.
 
-During restore, Context Capsule first converges window identity, tab identity, order, and geometry. It then maps each saved split back to the exact restored live tabs. If those tabs already form the saved split, no command is sent. Otherwise the extension multi-selects only those tabs and focuses their Zen window, then the native host invokes Zen's own Vertical, Horizontal, or Grid split command. The extension re-queries the tabs after the command and accepts the restore only when the members share a real split identity. A failed command leaves the tabs intact and produces a warning rather than silently representing the split as an ordinary tab group.
-
-On Windows the native host checks that the foreground executable is actually `zen.exe` before emitting the split shortcut. It reads `zen-keyboard-shortcuts.json` from the active Zen profile when available, so customized bindings for `cmd_zenSplitViewVertical`, `cmd_zenSplitViewHorizontal`, and `cmd_zenSplitViewGrid` are respected. If the profile shortcut exists but is disabled or unsupported, restore fails closed instead of guessing a key. When no profile shortcut file exists, the native host uses Zen's standard Ctrl+Alt+V/H/G bindings.
-
-The current portable split representation preserves membership and the major layout orientation. Zen's private arbitrary splitter-size/layout tree is not exposed through the standard WebExtension API, so Context Capsule currently recreates the real split using Zen's normal layout for that orientation rather than pretending it can round-trip an inaccessible divider tree.
-
-Split restoration deliberately skips saved split members that are pinned. Context Capsule does not modify Zen Essential/pinned semantics while reconstructing split views.
+Split markers remain non-portable group metadata and are never synthesized as ordinary named Firefox groups. Tabs that belonged to a saved split are restored as ordinary tabs in their saved relative order for now.
 
 Original live windows outside the assignment are cleaned up only after the complete saved topology has been restored, and only when they contain no pre-existing pinned tabs. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
 
 Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore. If the exact privileged tab is already open in an assigned window, it can be retained in place.
 
-Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied. Named Firefox tab groups remain portable groups; Zen split markers are handled only by the verified split restoration phase and are never synthesized as ordinary groups.
+Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied. Named Firefox tab groups remain portable groups; Zen split markers are captured but currently left unapplied during restore.
