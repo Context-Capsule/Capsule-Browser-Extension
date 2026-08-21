@@ -51,12 +51,12 @@ The CLI native host bounds and rotates these logs. Logging is fail-open: inabili
 ## Manual end-to-end test
 
 1. Start Firefox/Zen with the extension loaded.
-2. Open several tabs, create a named tab group, pin a tab, and optionally open a second browser window.
+2. Open several tabs, create a named tab group, pin a tab, and optionally open a second browser window. In Zen, include one or more Essentials if you want to exercise the Essential-preservation path.
 3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
 4. Click **Sync now**.
 5. In Capsule-CLI, run `cargo run -- save firefox-test` and then `cargo run -- show firefox-test --json`; the JSON should contain `snapshot.browsers.firefox`.
-6. Change/close some tabs or windows. For reuse testing, leave live windows whose tabs are subsets of different saved windows, and optionally leave one unrelated live window.
-7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Context Capsule should globally assign the best live window to each saved window, retain matching tabs, add only missing tabs, and reuse spare live windows as shells before creating new browser windows.
+6. Change/close some tabs or windows. For reuse testing, leave live windows whose tabs are subsets of different saved windows, scramble the ordinary tab order, and leave the Zen Essentials in their Essentials section.
+7. Enter `firefox-test` in the extension popup and click **Restore capsule**. Context Capsule should globally assign the best live window to each saved window, retain matching tabs, add only missing tabs, restore the saved relative order of ordinary tabs, preserve pre-existing Zen pinned/Essential tabs without moving or unpinning them, and reuse spare live windows as shells before creating new browser windows.
 8. Inspect `firefox.log` if a capture or restore is partial or fails.
 
 For a **cold-browser** test, use a persistently installed Context Capsule extension. Capsule-CLI opens a real bootstrap browser window/tab so WebExtensions and native messaging can start even when no Zen windows were open. The restore bus request/completion is the authoritative adapter handshake; the bootstrap is only startup state and is eligible for reuse by the same global restore planner.
@@ -65,7 +65,15 @@ For a **cold-browser** test, use a persistently installed Context Capsule extens
 
 The capsule is the target state rather than an additive suggestion. Before creating anything, the adapter inspects all live non-private browser windows and computes a global maximum-reuse assignment against all saved windows. The leading objective is the total number of already-open saved tabs that can be retained across the complete restore. Ties favor exact or subset semantic matches, then inexpensive shells with less unrelated state, then saved geometry. A usable live window with no matching tabs is still preferred over creating another window when the saved topology needs a shell.
 
-For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, pin/mute/order/active state and named tab groups are reconciled, unrelated original tabs are removed only after target tabs safely exist, and the saved window geometry/state is restored. A new native Zen window is created only for a saved window that has no remaining live window to reuse.
+For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, mute/active state and named tab groups are reconciled, ordinary tabs outside the capsule are removed only after target tabs safely exist, and the saved window geometry/state is restored. Tab ordering is segment-aware: saved pinned targets are ordered within the mutable pinned region and ordinary targets are ordered within the unpinned region. Ordering is verified and retried after creation and again after group restoration so group operations cannot silently leave the tab sequence scrambled.
+
+### Zen Essentials
+
+Zen Essentials carry a private `zen-essential` state in Zen's own session store. The standard Firefox WebExtension `tabs.Tab` API exposes an Essential only as a pinned tab and does not expose a supported operation for setting that private Essential marker. Context Capsule therefore treats every pinned tab that already existed in an assigned Zen window as protected native state: it is not deleted, moved through the generic tab strip, or changed from pinned to unpinned during reconciliation. Matching protected tabs are reused as the same live tab objects, preserving Zen's hidden Essential state.
+
+If a saved ordinary tab has the same URL/container as a protected live pinned/Essential tab, the protected tab is not consumed and demoted; Context Capsule restores a separate ordinary target tab instead. Likewise, a pinned tab that appeared after the capsule was saved is preserved rather than deleted because the WebExtension cannot safely determine whether it is an Essential.
+
+This protection is intentionally asymmetric. Context Capsule can preserve an Essential that Zen already has, but a standard WebExtension cannot reliably manufacture a missing Zen Essential from scratch. If an Essential is completely absent at restore time, a newly created saved pinned tab can only be restored as a normal pinned tab through the supported WebExtension API; promoting it into Zen's private Essentials section remains Zen-owned state.
 
 Original live windows outside the assignment are closed only after the complete saved topology has been restored. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
 
