@@ -73,6 +73,8 @@ const NORMAL_GEOMETRY_SETTLE_MS = 180;
 const NORMAL_GEOMETRY_RETRIES = 5;
 const NON_NORMAL_GEOMETRY_RETRIES = 3;
 const NORMAL_GEOMETRY_TOLERANCE = 8;
+const TAB_ORDER_SETTLE_MS = 60;
+const TAB_ORDER_RETRIES = 3;
 const WINDOW_REUSE_OVERLAP_WEIGHT = 1_000_000_000_000;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
@@ -531,7 +533,15 @@ function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.
 
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
     const candidates = available
-      .filter((tab) => tab.id !== undefined && !reusedTabIds.has(tab.id) && sameTabSemanticIdentity(savedTab, tab))
+      .filter((tab) =>
+        tab.id !== undefined
+        && !reusedTabIds.has(tab.id)
+        && sameTabSemanticIdentity(savedTab, tab)
+        // Zen Essentials are surfaced to WebExtensions only as ordinary pinned
+        // tabs; their private zen-essential bit is not exposed. Never consume a
+        // live pinned tab as an unpinned target, because doing so would require
+        // unpinning it and could silently demote an Essential.
+        && !(tab.pinned && !savedTab.pinned))
       .sort((left, right) => {
         const leftPinPenalty = left.pinned === savedTab.pinned ? 0 : 1;
         const rightPinPenalty = right.pinned === savedTab.pinned ? 0 : 1;
@@ -551,12 +561,19 @@ function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.
 async function reconcileTabs(
   saved: BrowserWindowSnapshot,
   restoredByIndex: Map<number, browser.tabs.Tab>,
+  protectedPinnedIds: ReadonlySet<number> = new Set<number>(),
 ): Promise<void> {
   for (const savedTab of saved.tabs) {
     const tab = restoredByIndex.get(savedTab.index);
     if (tab?.id === undefined) continue;
     const changes: Parameters<typeof browser.tabs.update>[1] = {};
-    if (tab.pinned !== savedTab.pinned) changes.pinned = savedTab.pinned;
+    if (tab.pinned !== savedTab.pinned) {
+      // A tab that was already pinned before restore may be a Zen Essential.
+      // Preserve that exact native tab object and its hidden Zen section state.
+      if (!(protectedPinnedIds.has(tab.id) && tab.pinned && !savedTab.pinned)) {
+        changes.pinned = savedTab.pinned;
+      }
+    }
     if (tab.mutedInfo?.muted !== savedTab.muted) changes.muted = savedTab.muted;
     if (Object.keys(changes).length > 0) {
       await browser.tabs.update(tab.id, changes).catch(() => undefined);
@@ -571,18 +588,70 @@ async function reconcileTabs(
   }
 }
 
+function sameNumberOrder(actual: number[], expected: number[]): boolean {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
 async function orderRestoredTabs(
   saved: BrowserWindowSnapshot,
   restoredByIndex: Map<number, browser.tabs.Tab>,
   windowId: number,
-): Promise<void> {
-  let targetIndex = 0;
-  for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
+  protectedPinnedIds: ReadonlySet<number> = new Set<number>(),
+): Promise<boolean> {
+  const sortedSaved = [...saved.tabs].sort((a, b) => a.index - b.index);
+  const desiredMutablePinnedIds: number[] = [];
+  const desiredUnpinnedIds: number[] = [];
+
+  for (const savedTab of sortedSaved) {
     const tab = restoredByIndex.get(savedTab.index);
-    if (tab?.id === undefined) continue;
-    await browser.tabs.move(tab.id, { windowId, index: targetIndex }).catch(() => undefined);
-    targetIndex += 1;
+    if (tab?.id === undefined || protectedPinnedIds.has(tab.id)) continue;
+    if (savedTab.pinned) desiredMutablePinnedIds.push(tab.id);
+    else desiredUnpinnedIds.push(tab.id);
   }
+
+  for (let attempt = 0; attempt < TAB_ORDER_RETRIES; attempt += 1) {
+    let current = await browser.windows.get(windowId, { populate: true }).catch(() => undefined);
+    if (!current) return false;
+
+    // Do not move original pinned tabs at all. Zen keeps Essentials at the
+    // beginning of its pinned region using a private attribute; moving those
+    // tabs through the generic WebExtension API can collapse that distinction.
+    const protectedPinnedCount = (current.tabs ?? []).filter(
+      (tab) => tab.id !== undefined && tab.pinned && protectedPinnedIds.has(tab.id),
+    ).length;
+    for (const [rank, id] of desiredMutablePinnedIds.entries()) {
+      await browser.tabs.move(id, { windowId, index: protectedPinnedCount + rank }).catch(() => undefined);
+    }
+
+    current = await browser.windows.get(windowId, { populate: true }).catch(() => undefined);
+    if (!current) return false;
+    const pinnedCount = (current.tabs ?? []).filter((tab) => tab.pinned).length;
+    for (const [rank, id] of desiredUnpinnedIds.entries()) {
+      await browser.tabs.move(id, { windowId, index: pinnedCount + rank }).catch(() => undefined);
+    }
+
+    await delay(TAB_ORDER_SETTLE_MS * (attempt + 1));
+    current = await browser.windows.get(windowId, { populate: true }).catch(() => undefined);
+    if (!current) return false;
+
+    const mutablePinnedSet = new Set(desiredMutablePinnedIds);
+    const unpinnedSet = new Set(desiredUnpinnedIds);
+    const actualMutablePinned = (current.tabs ?? [])
+      .filter((tab) => tab.id !== undefined && tab.pinned && mutablePinnedSet.has(tab.id))
+      .map((tab) => tab.id as number);
+    const actualUnpinned = (current.tabs ?? [])
+      .filter((tab) => tab.id !== undefined && !tab.pinned && unpinnedSet.has(tab.id))
+      .map((tab) => tab.id as number);
+
+    if (
+      sameNumberOrder(actualMutablePinned, desiredMutablePinnedIds)
+      && sameNumberOrder(actualUnpinned, desiredUnpinnedIds)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function reuseAssignedWindow(
@@ -597,6 +666,11 @@ async function reuseAssignedWindow(
   const originalTabIds = (current.tabs ?? [])
     .map((tab) => tab.id)
     .filter((id): id is number => id !== undefined);
+  const protectedPinnedIds = new Set(
+    (current.tabs ?? [])
+      .filter((tab) => tab.id !== undefined && tab.pinned)
+      .map((tab) => tab.id as number),
+  );
   const reusedCount = restoredByIndex.size;
 
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
@@ -620,8 +694,13 @@ async function reuseAssignedWindow(
   }
 
   // Only delete live extras once at least one target tab is known to be present.
-  // This keeps a partial creation failure from closing the reusable window.
-  const extraTabIds = originalTabIds.filter((id) => !reusedTabIds.has(id));
+  // Existing pinned tabs are deliberately excluded: Zen does not expose the
+  // private zen-essential flag through the WebExtension tabs API, so deleting a
+  // pinned "extra" could destroy an Essential that Zen itself is responsible
+  // for persisting across Spaces/windows.
+  const extraTabIds = originalTabIds.filter(
+    (id) => !reusedTabIds.has(id) && !protectedPinnedIds.has(id),
+  );
   if (restoredByIndex.size > 0) {
     for (const id of extraTabIds) {
       await browser.tabs.remove(id).catch(() => undefined);
@@ -632,9 +711,15 @@ async function reuseAssignedWindow(
     );
   }
 
-  await reconcileTabs(saved, restoredByIndex);
-  await orderRestoredTabs(saved, restoredByIndex, windowId);
+  await reconcileTabs(saved, restoredByIndex, protectedPinnedIds);
+  const preGroupOrder = await orderRestoredTabs(saved, restoredByIndex, windowId, protectedPinnedIds);
   await restoreGroups(windowId, saved, restoredByIndex, report);
+  const finalOrder = await orderRestoredTabs(saved, restoredByIndex, windowId, protectedPinnedIds);
+  if (!preGroupOrder || !finalOrder) {
+    report.warnings.push(
+      `Tab order for ${saved.key} did not fully converge after ${TAB_ORDER_RETRIES} verified placement attempts; existing Zen pinned/Essential tabs were preserved rather than moved destructively.`,
+    );
+  }
   await restoreGeometry(windowId, saved).catch((error) => {
     report.warnings.push(
       `Could not reconcile geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
@@ -673,8 +758,14 @@ async function populateWindow(
   }
 
   await reconcileTabs(saved, restoredByIndex);
-  await orderRestoredTabs(saved, restoredByIndex, windowId);
+  const preGroupOrder = await orderRestoredTabs(saved, restoredByIndex, windowId);
   await restoreGroups(windowId, saved, restoredByIndex, report);
+  const finalOrder = await orderRestoredTabs(saved, restoredByIndex, windowId);
+  if (!preGroupOrder || !finalOrder) {
+    report.warnings.push(
+      `Tab order for ${saved.key} did not fully converge after ${TAB_ORDER_RETRIES} verified placement attempts.`,
+    );
+  }
   await restoreGeometry(windowId, saved).catch((error) => {
     report.warnings.push(
       `Could not restore geometry for ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
