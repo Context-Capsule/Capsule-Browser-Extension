@@ -117,13 +117,28 @@ export class NativeClient {
     }
   }
 
+  /**
+   * Split invocation deliberately uses a one-shot native-message process rather
+   * than the long-lived adapter port. During development the CLI/native-host
+   * binary is rebuilt in place; an already connected host can therefore remain
+   * an older executable in memory even though the file on disk is current.
+   * A fresh process makes the command path deterministic without disrupting the
+   * persistent state/capture connection.
+   */
   async invokeZenSplit(orientation: BrowserSplitOrientation): Promise<void> {
-    await this.request({
+    const request: NativeRequest = {
       protocol_version: NATIVE_PROTOCOL_VERSION,
       request_id: requestId(),
       type: "browser.zen.split.invoke",
       split_orientation: orientation,
-    });
+    };
+    const response = await browser.runtime.sendNativeMessage(
+      NATIVE_HOST_NAME,
+      request,
+    ) as NativeResponse | undefined;
+    if (!response?.ok) {
+      throw new Error(response?.error ?? "Fresh Context Capsule native host rejected the Zen split command");
+    }
   }
 
   private async ping(): Promise<NativeResponse> {
