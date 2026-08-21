@@ -23,8 +23,23 @@ interface PopupStatus {
   };
 }
 
+interface MessageErrorEnvelope {
+  __context_capsule_error: string;
+}
+
+function isMessageError(value: unknown): value is MessageErrorEnvelope {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && "__context_capsule_error" in value
+    && typeof (value as MessageErrorEnvelope).__context_capsule_error === "string",
+  );
+}
+
 async function request<T>(message: unknown): Promise<T> {
-  return browser.runtime.sendMessage(message) as Promise<T>;
+  const response = await browser.runtime.sendMessage(message) as T | MessageErrorEnvelope;
+  if (isMessageError(response)) throw new Error(response.__context_capsule_error);
+  return response as T;
 }
 
 function details(status: PopupStatus): string[] {
