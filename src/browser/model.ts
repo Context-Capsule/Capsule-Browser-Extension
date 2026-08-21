@@ -1,5 +1,9 @@
+import { BROWSER_TARGET, IS_CHROME } from "../platform";
+
 export const BROWSER_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export const FIREFOX_BROWSER_ID = "firefox" as const;
+export const CHROME_BROWSER_ID = "chrome" as const;
+export type BrowserAdapterId = typeof FIREFOX_BROWSER_ID | typeof CHROME_BROWSER_ID;
 
 export type BrowserWindowState = "normal" | "minimized" | "maximized" | "fullscreen";
 export type BrowserSplitOrientation = "vertical" | "horizontal" | "grid";
@@ -48,16 +52,23 @@ export interface BrowserWindowSnapshot {
   groups: BrowserTabGroupSnapshot[];
 }
 
+/**
+ * Kept under the historical FirefoxSnapshot name so protocol/schema consumers
+ * remain source-compatible. The payload is intentionally browser-neutral now;
+ * the `browser` discriminator says which adapter owns it.
+ */
 export interface FirefoxSnapshot {
   schema_version: typeof BROWSER_SNAPSHOT_SCHEMA_VERSION;
-  browser: typeof FIREFOX_BROWSER_ID;
+  browser: BrowserAdapterId;
   extension_version: string;
-  /** Firefox reports "development" for an unpacked temporary development add-on. */
+  /** Firefox and Chrome both expose install type through management.getSelf(). */
   install_type?: string;
   captured_at_unix_ms: number;
   skipped_private_windows: number;
   windows: BrowserWindowSnapshot[];
 }
+
+export type BrowserSnapshot = FirefoxSnapshot;
 
 export interface RestoreReport {
   created_windows: number;
@@ -126,20 +137,24 @@ export function isDisposableBootstrapTabs(live: ComparableLiveTab[]): boolean {
   const tab = live[0];
   if (!tab || tab.pinned) return false;
   const url = tab.url ?? "about:blank";
-  return url === "about:blank" || url === "about:newtab" || url === "about:home";
+  return url === "about:blank" || url === "about:newtab" || url === "about:home" || url === "chrome://newtab/";
 }
 
 /**
- * Named groups are portable through the standard Firefox tabGroups API. Split
- * relationships deliberately use a private snapshot marker and are restored by
- * Zen's own split command instead of being synthesized as an ordinary group.
+ * Firefox/Zen anonymous groups are used as the split-view fallback signal and
+ * must not be replayed as normal groups. Chrome, however, supports legitimate
+ * unnamed tab groups, so those are portable there.
  */
 export function isPortableTabGroup(group: BrowserTabGroupSnapshot): boolean {
-  return group.title.trim().length > 0 && !isSplitViewGroup(group);
+  return !isSplitViewGroup(group) && (IS_CHROME || group.title.trim().length > 0);
 }
 
-export function tabCount(snapshot: FirefoxSnapshot): number {
+export function tabCount(snapshot: Pick<FirefoxSnapshot, "windows">): number {
   return snapshot.windows.reduce((total, window) => total + window.tabs.length, 0);
+}
+
+export function currentBrowserAdapterId(): BrowserAdapterId {
+  return BROWSER_TARGET;
 }
 
 export function isRestorableUrl(url: string): boolean {
@@ -156,7 +171,7 @@ export function isRestorableUrl(url: string): boolean {
 }
 
 export function restorableUrl(url: string): string | undefined {
-  if (url === "about:newtab") {
+  if (url === "about:newtab" || url === "chrome://newtab/") {
     return undefined;
   }
   return isRestorableUrl(url) ? url : undefined;
@@ -192,15 +207,13 @@ function multisetOverlap(left: string[], right: string[]): number {
 /**
  * Score whether a live window is already the saved window even when the live
  * topology is not byte-for-byte identical. Restore must be conservative here:
- * a false negative creates a duplicate Zen window, while a false positive only
+ * a false negative creates a duplicate browser window, while a false positive
  * means Context Capsule leaves a changed live window alone.
  *
  * Privileged/non-restorable tabs are deliberately excluded from fuzzy identity.
- * They cannot be recreated and Firefox-derived browsers may expose them
- * differently between capture and restore. Single-tab windows remain strict so
- * a saved ChatGPT-only window can never match a large window that merely happens
- * to contain the same ChatGPT tab. Pinned tabs can be shared Zen Essentials, so
- * fuzzy matching also requires independent evidence from unpinned tabs.
+ * Single-tab windows remain strict. Firefox/Zen pinned tabs can include shared
+ * Essentials, so fuzzy matching also requires independent evidence from
+ * unpinned tabs.
  */
 export function savedWindowSimilarity(
   saved: BrowserWindowSnapshot,
