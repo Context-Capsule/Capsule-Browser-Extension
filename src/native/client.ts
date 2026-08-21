@@ -6,7 +6,7 @@ import {
   type RestoreRequest,
   requestId,
 } from "./protocol";
-import type { FirefoxSnapshot, RestoreReport } from "../browser/model";
+import type { BrowserSplitOrientation, FirefoxSnapshot, RestoreReport } from "../browser/model";
 
 export interface NativeClientStatus {
   connected: boolean;
@@ -102,12 +102,6 @@ export class NativeClient {
     return response.snapshot;
   }
 
-  /**
-   * Ask the native host to create Zen's independent blank window. A plain
-   * Firefox process is the only condition treated as unsupported. Any other
-   * error remains an error so restore never falls through to browser.windows
-   * creation on a Zen process after a transient native failure.
-   */
   async createBlankBrowserWindow(): Promise<BlankBrowserWindowResult> {
     try {
       await this.request({
@@ -118,11 +112,18 @@ export class NativeClient {
       return "created";
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.toLocaleLowerCase("en-US").includes(ZEN_NOT_RUNNING)) {
-        return "unsupported";
-      }
+      if (message.toLocaleLowerCase("en-US").includes(ZEN_NOT_RUNNING)) return "unsupported";
       throw error;
     }
+  }
+
+  async invokeZenSplit(orientation: BrowserSplitOrientation): Promise<void> {
+    await this.request({
+      protocol_version: NATIVE_PROTOCOL_VERSION,
+      request_id: requestId(),
+      type: "browser.zen.split.invoke",
+      split_orientation: orientation,
+    });
   }
 
   private async ping(): Promise<NativeResponse> {
