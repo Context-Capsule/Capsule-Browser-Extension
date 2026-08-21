@@ -305,11 +305,11 @@ export async function enforceFinalTabOrder(snapshot: FirefoxSnapshot): Promise<F
 
   for (const [savedIndex, saved] of snapshot.windows.entries()) {
     const match = assignment.get(savedIndex);
-    const windowId = match?.window.id;
-    if (windowId === undefined) {
+    if (!match || match.window.id === undefined) {
       result.warnings.push(`Could not identify the restored live window for final tab ordering in ${saved.key}.`);
       continue;
     }
+    const windowId = match.window.id;
 
     const desiredIds = desiredUnpinnedIds(saved, match.mappedBySavedIndex);
     const before = await liveWindowTabs(windowId);
