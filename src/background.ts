@@ -40,6 +40,8 @@ let lastRestore: RestoreReport | undefined;
 let lastHandledRestoreRequestId: string | undefined;
 let lastLoggedError: string | undefined;
 
+const RESTORE_POLL_MS = 350;
+
 const native = new NativeClient((status) => {
   const wasConnected = nativeStatus.connected;
   nativeStatus = status;
@@ -278,4 +280,4 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
 native.connect();
 scheduleSync(100, "startup");
 setInterval(() => scheduleSync(0), 30_000);
-setInterval(() => void pollNativeRestore(), 1_000);
+setInterval(() => void pollNativeRestore(), RESTORE_POLL_MS);
