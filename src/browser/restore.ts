@@ -986,13 +986,24 @@ export async function restoreFirefoxSnapshot(
   }
 
   // Preserve unrelated windows if any saved window failed. Once the complete
-  // target topology exists, remove original live windows that were not selected
-  // by the global assignment: at that point they are genuinely outside the
-  // authoritative capsule rather than potential recovery candidates.
+  // target topology exists, remove only original live windows that are both
+  // unassigned and free of pinned state. A pinned tab may be a Zen Essential,
+  // and the WebExtension API cannot tell us safely whether closing its entire
+  // window would destroy private Zen-owned state.
   if (snapshot.windows.length > 0 && restoredWindowCount === snapshot.windows.length) {
+    let preservedPinnedWindows = 0;
     for (const current of currentWindows) {
       if (current.id === undefined || usedWindowIds.has(current.id)) continue;
+      if ((current.tabs ?? []).some((tab) => tab.pinned)) {
+        preservedPinnedWindows += 1;
+        continue;
+      }
       await browser.windows.remove(current.id).catch(() => undefined);
+    }
+    if (preservedPinnedWindows > 0) {
+      report.warnings.push(
+        `Preserved ${preservedPinnedWindows} unassigned live browser window(s) because they contain pre-existing pinned tabs that may carry Zen Essential state.`,
+      );
     }
   } else if (currentWindows.some((window) => window.id !== undefined && !usedWindowIds.has(window.id))) {
     report.warnings.push(
