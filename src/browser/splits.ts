@@ -24,7 +24,10 @@ export interface SplitRestoreResult {
 
 export type ZenSplitInvoker = (orientation: BrowserSplitOrientation) => Promise<void>;
 
-const SPLIT_COMMAND_SETTLE_MS = 350;
+const SPLIT_VERIFY_TIMEOUT_MS = 700;
+const SPLIT_VERIFY_POLL_MS = 35;
+const SPLIT_INVOKE_ATTEMPTS = 3;
+const SPLIT_FOCUS_SETTLE_MS = 45;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -124,6 +127,38 @@ async function refreshedTabs(ids: number[]): Promise<ExtendedTab[]> {
   return result;
 }
 
+async function waitForRealSplit(windowId: number, ids: number[]): Promise<boolean> {
+  const deadline = Date.now() + SPLIT_VERIFY_TIMEOUT_MS;
+  do {
+    const tabs = await refreshedTabs(ids);
+    if (tabs.length === ids.length && await tabsFormRealSplit(windowId, tabs)) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(SPLIT_VERIFY_POLL_MS);
+  } while (true);
+}
+
+/**
+ * Reassert the exact multi-selection before every native attempt. Native input
+ * can change focus/selection even when it fails to dispatch the command, so a
+ * retry must never inherit the previous attempt's transient UI state.
+ */
+async function prepareSplitSelection(windowId: number, ids: number[]): Promise<boolean> {
+  const current = await refreshedTabs(ids);
+  if (current.length !== ids.length) return false;
+  const indices = current.map(tab => tab.index).sort((left, right) => left - right);
+  await browser.tabs.highlight({ windowId, tabs: indices });
+  await browser.windows.update(windowId, { focused: true });
+
+  const selected = await refreshedTabs(ids);
+  if (selected.length !== ids.length) return false;
+  const highlighted = selected.filter(tab => tab.highlighted).length;
+  // Firefox/Zen always has one active tab. `tabs.highlight` should expose all
+  // requested members as highlighted; verify that state instead of assuming it.
+  if (highlighted !== ids.length) return false;
+  await delay(SPLIT_FOCUS_SETTLE_MS);
+  return true;
+}
+
 export async function restoreSavedSplitViews(
   snapshot: FirefoxSnapshot,
   invokeZenSplit: ZenSplitInvoker,
@@ -182,32 +217,33 @@ export async function restoreSavedSplitViews(
         continue;
       }
 
-      const current = await refreshedTabs(ids);
-      if (current.length !== ids.length) {
-        result.warnings.push(`One or more tabs disappeared before split '${split.group.key}' could be restored.`);
-        continue;
-      }
-      const indices = current.map(tab => tab.index).sort((left, right) => left - right);
+      let restored = false;
+      let lastError: string | undefined;
+      for (let attempt = 1; attempt <= SPLIT_INVOKE_ATTEMPTS; attempt += 1) {
+        if (!(await prepareSplitSelection(windowId, ids))) {
+          lastError = "the exact saved tabs could not be re-selected before invoking Zen";
+          break;
+        }
 
-      try {
-        await browser.tabs.highlight({ windowId, tabs: indices });
-        await browser.windows.update(windowId, { focused: true });
-        await delay(120);
-        await invokeZenSplit(split.orientation);
-        await delay(SPLIT_COMMAND_SETTLE_MS);
-      } catch (error) {
-        result.warnings.push(
-          `Failed to invoke Zen split '${split.group.key}' (${split.orientation}) in ${saved.key}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        continue;
+        try {
+          await invokeZenSplit(split.orientation);
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+          continue;
+        }
+
+        if (await waitForRealSplit(windowId, ids)) {
+          restored = true;
+          break;
+        }
+        lastError = `Zen accepted native attempt ${attempt}, but the tabs never acquired a shared split identity`;
       }
 
-      const verified = await refreshedTabs(ids);
-      if (verified.length === ids.length && await tabsFormRealSplit(windowId, verified)) {
+      if (restored) {
         result.restored += 1;
       } else {
         result.warnings.push(
-          `Zen did not form a verified ${split.orientation} split for '${split.group.key}' in ${saved.key}; the tabs were left intact.`,
+          `Zen did not form a verified ${split.orientation} split for '${split.group.key}' in ${saved.key} after ${SPLIT_INVOKE_ATTEMPTS} clean attempt(s)${lastError ? `; ${lastError}` : ""}. The tabs were left intact.`,
         );
       }
     }
