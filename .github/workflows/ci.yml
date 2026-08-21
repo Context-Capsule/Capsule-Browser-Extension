@@ -20,8 +20,14 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm build
-      - run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
+      - name: Build Firefox target
+        run: pnpm build
+      - name: Lint Firefox target
+        run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
+      - name: Build Chrome target
+        run: pnpm build:chrome
+      - name: Verify target isolation
+        run: pnpm test:build-targets
 
   dev-watch-windows:
     runs-on: windows-latest
