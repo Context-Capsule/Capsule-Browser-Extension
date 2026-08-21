@@ -1,6 +1,6 @@
+import { IS_FIREFOX } from "../platform";
 import {
   BROWSER_SNAPSHOT_SCHEMA_VERSION,
-  FIREFOX_BROWSER_ID,
   type BrowserSplitOrientation,
   type BrowserTabGroupSnapshot,
   type BrowserTabSnapshot,
@@ -8,6 +8,7 @@ import {
   type BrowserWindowState,
   type FirefoxSnapshot,
   type TabGroupColor,
+  currentBrowserAdapterId,
   isRestorableUrl,
   splitGroupTitle,
 } from "./model";
@@ -65,6 +66,10 @@ export function isCapturedSplitGroup(
   group: { title: string },
   members: ExtendedTab[],
 ): boolean {
+  // Chrome has legitimate unnamed tab groups. The anonymous-group fallback is
+  // a Zen implementation detail and must never reinterpret Chrome groups as
+  // split views.
+  if (!IS_FIREFOX) return false;
   if (members.length < 2 || members.length > 4) return false;
   const explicitIds = members
     .map(tab => tab.splitViewId)
@@ -104,7 +109,7 @@ async function captureWindow(
   const capturedTabs: BrowserTabSnapshot[] = tabs.map((tab) => {
     const url = tab.url ?? "about:blank";
     const groupKey = tab.groupId === undefined || tab.groupId < 0 ? undefined : groupKeyById.get(tab.groupId);
-    const cookieStoreId = tab.cookieStoreId;
+    const cookieStoreId = IS_FIREFOX ? tab.cookieStoreId : undefined;
     const snapshot: BrowserTabSnapshot = {
       index: tab.index,
       url,
@@ -147,7 +152,7 @@ async function extensionInstallType(): Promise<string | undefined> {
   }
 }
 
-export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
+export async function captureBrowserSnapshot(): Promise<FirefoxSnapshot> {
   const extension = browser.runtime.getManifest();
   const [windows, installType] = await Promise.all([
     browser.windows.getAll({ populate: true, windowTypes: ["normal"] }),
@@ -157,7 +162,7 @@ export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
   const captured = await Promise.all(windows.map((window, index) => captureWindow(window, index)));
   const snapshot: FirefoxSnapshot = {
     schema_version: BROWSER_SNAPSHOT_SCHEMA_VERSION,
-    browser: FIREFOX_BROWSER_ID,
+    browser: currentBrowserAdapterId(),
     extension_version: extension.version,
     captured_at_unix_ms: Date.now(),
     skipped_private_windows: privateCount,
@@ -165,4 +170,9 @@ export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
   };
   if (installType) snapshot.install_type = installType;
   return snapshot;
+}
+
+/** Backward-compatible export used by the existing Firefox-focused tests. */
+export async function captureFirefoxSnapshot(): Promise<FirefoxSnapshot> {
+  return captureBrowserSnapshot();
 }
