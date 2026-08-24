@@ -1,0 +1,115 @@
+name: Apply Chrome Pinned Restore Fix
+
+on:
+  push:
+    branches: ['feature/chrome-build-target-20260822']
+    paths: ['.github/workflows/apply-chrome-pinned-restore-fix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.event.head_commit.message == 'chore: apply Chrome pinned restore fix'
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Verify POTUS-linux runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test '${{ runner.name }}' = 'POTUS-linux' || { echo "Expected runner POTUS-linux, got '${{ runner.name }}'" >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/chrome-build-target-20260822
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Apply browser-specific pinned-state safeguards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          restore = Path('src/browser/restore.ts')
+          text = restore.read_text(encoding='utf-8')
+
+          def once(old: str, new: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one occurrence, found {count}: {old[:100]!r}')
+              text = text.replace(old, new, 1)
+
+          once(
+              '} from "./model";\n',
+              '} from "./model";\nimport { IS_FIREFOX } from "../platform";\n',
+          )
+          once(
+              'report.warnings.push("This Firefox version does not expose the tabGroups API; named tab groups were restored ungrouped.");',
+              'report.warnings.push("This browser does not expose the tabGroups API; named tab groups were restored ungrouped.");',
+          )
+          once(
+              '&& !(tab.pinned && !savedTab.pinned))',
+              '&& !(IS_FIREFOX && tab.pinned && !savedTab.pinned))',
+          )
+          once(
+              '''  const protectedPinnedIds = new Set(\n    (current.tabs ?? [])\n      .filter((tab) => tab.id !== undefined && tab.pinned)\n      .map((tab) => tab.id as number),\n  );''',
+              '''  const protectedPinnedIds = IS_FIREFOX\n    ? new Set(\n        (current.tabs ?? [])\n          .filter((tab) => tab.id !== undefined && tab.pinned)\n          .map((tab) => tab.id as number),\n      )\n    : new Set<number>();''',
+          )
+          once(
+              'if ((current.tabs ?? []).some((tab) => tab.pinned)) {',
+              'if (IS_FIREFOX && (current.tabs ?? []).some((tab) => tab.pinned)) {',
+          )
+          once(
+              'throw new Error("Firefox returned an existing window without an ID");',
+              'throw new Error("Browser returned an existing window without an ID");',
+          )
+          once(
+              'throw new Error("Firefox returned a bootstrap window without an ID");',
+              'throw new Error("Browser returned a bootstrap window without an ID");',
+          )
+          once(
+              'throw new Error("Firefox created a window without an ID");',
+              'throw new Error("Browser created a window without an ID");',
+          )
+          once(
+              '`Firefox created ${saved.key} with unexpected user tabs; the new window was closed without modifying them.`',
+              '`Browser created ${saved.key} with unexpected user tabs; the new window was closed without modifying them.`',
+          )
+          once(
+              '`Tab order for ${saved.key} did not fully converge after ${TAB_ORDER_RETRIES} verified placement attempts; existing Zen pinned/Essential tabs were preserved rather than moved destructively.`',
+              '`Tab order for ${saved.key} did not fully converge after ${TAB_ORDER_RETRIES} verified placement attempts; adapter-specific protected pinned state was preserved.`',
+          )
+
+          restore.write_text(text, encoding='utf-8')
+
+          test_script = Path('scripts/test-chrome-target.mjs')
+          test = test_script.read_text(encoding='utf-8')
+          old_import = 'import { mkdir, rm } from "node:fs/promises";'
+          new_import = 'import { mkdir, readFile, rm } from "node:fs/promises";'
+          if test.count(old_import) != 1:
+              raise SystemExit('unexpected chrome-target test fs import')
+          test = test.replace(old_import, new_import, 1)
+          marker = '  process.exitCode = result.status ?? 1;'
+          contract = '''  process.exitCode = result.status ?? 1;\n  const restoreSource = await readFile("src/browser/restore.ts", "utf8");\n  if (!restoreSource.includes("IS_FIREFOX && tab.pinned && !savedTab.pinned")) {\n    throw new Error("Chrome restore must not inherit Zen pinned-tab reuse protection");\n  }\n  if (!restoreSource.includes("IS_FIREFOX && (current.tabs ?? []).some((tab) => tab.pinned)")) {\n    throw new Error("Chrome restore must not preserve unrelated pinned windows as Zen Essentials");\n  }'''
+          if test.count(marker) != 1:
+              raise SystemExit('unexpected chrome-target test result marker')
+          test = test.replace(marker, contract, 1)
+          test_script.write_text(test, encoding='utf-8')
+          PY
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build:chrome
+      - run: pnpm test:build-targets
+      - name: Commit verified fix and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/apply-chrome-pinned-restore-fix.yml
+          git add src/browser/restore.ts scripts/test-chrome-target.mjs
+          git config user.name 'GPT-Slave'
+          git config user.email '313162660+GPT-Slave@users.noreply.github.com'
+          git commit -m 'fix: scope Zen pinned-state safeguards to Firefox'
+          git push origin HEAD:feature/chrome-build-target-20260822
