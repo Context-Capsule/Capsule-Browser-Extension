@@ -7,11 +7,9 @@ on:
 
 permissions:
   contents: write
-  statuses: write
 
 jobs:
-  apply-fix:
-    if: github.event.head_commit.message == 'chore: apply Zen restore regression fix'
+  apply-and-verify:
     runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Verify POTUS runner
@@ -28,207 +26,19 @@ jobs:
         with:
           python-version: '3.12'
       - run: corepack enable
-      - name: Patch Zen window matching and add exact regression coverage
-        shell: pwsh
-        run: |
-          @'
-          from pathlib import Path
-
-          restore_path = Path('src/browser/restore.ts')
-          text = restore_path.read_text(encoding='utf-8')
-
-          def once(old: str, new: str) -> None:
-              global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected exactly one occurrence, found {count}: {old[:140]!r}')
-              text = text.replace(old, new, 1)
-
-          once(
-              '} from "./model";\n',
-              '} from "./model";\nimport { IS_FIREFOX } from "../platform";\n',
-          )
-          once(
-              'const WINDOW_REUSE_OVERLAP_WEIGHT = 1_000_000_000_000;\n',
-              'const WINDOW_REUSE_UNPINNED_OVERLAP_WEIGHT = 1_000_000_000_000;\nconst WINDOW_REUSE_TOTAL_OVERLAP_WEIGHT = 1_000_000_000;\n',
-          )
-          once(
-              'function semanticTabKey(url: string, cookieStoreId: string | undefined): string {\n  return `${cookieStoreId ?? ""}\\u0000${url}`;\n}',
-              'function semanticTabKey(url: string, cookieStoreId: string | undefined, pinned: boolean): string {\n  return `${pinned ? "p" : "u"}\\u0000${cookieStoreId ?? ""}\\u0000${url}`;\n}',
-          )
-          once(
-              'const savedKeys = savedRelevant.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id));\n  const liveKeys = liveRelevant.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId));',
-              'const savedKeys = savedRelevant.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id, tab.pinned));\n  const liveKeys = liveRelevant.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId, tab.pinned));',
-          )
-          once(
-              'savedUnpinned.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id)),\n    liveUnpinned.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId)),',
-              'savedUnpinned.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id, false)),\n    liveUnpinned.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId, false)),',
-          )
-          once(
-              '  const strongFuzzyIdentity = similarity.score > 0;\n\n  const savedCoverage',
-              '  const strongFuzzyIdentity = similarity.score > 0;\n  // Shared Zen Essentials/pinned tabs exist in more than one Zen window and\n  // therefore cannot establish which saved window owns a live window. Only a\n  // real semantic identity/subset (or a disposable blank shell) participates in\n  // the global assignment. An unambiguous one-window fallback is handled after\n  // semantic assignment so it cannot steal a better match from another target.\n  if (!(similarity.exact || strongFuzzyIdentity || reuse.liveSubset || disposableBootstrapWindow(current))) {\n    return undefined;\n  }\n\n  const savedCoverage',
-          )
-          once(
-              '  // The leading term makes total reusable tab count the global objective. The\n  // smaller terms break ties in favor of exact/subset semantic identity, then\n  // cheap shells (blank/fewer unrelated tabs), and finally saved geometry. A\n  // final +1 keeps even a zero-overlap live window preferable to a dummy slot:\n  // if a real window exists, reuse it before creating another one.\n  const weight = reuse.overlap * WINDOW_REUSE_OVERLAP_WEIGHT',
-              '  // User tabs establish window identity. Total overlap is only secondary so\n  // shared Zen Essentials cannot outweigh evidence from ordinary unpinned tabs.\n  const weight = reuse.unpinnedOverlap * WINDOW_REUSE_UNPINNED_OVERLAP_WEIGHT\n    + reuse.overlap * WINDOW_REUSE_TOTAL_OVERLAP_WEIGHT',
-          )
-
-          old_assign = '''function assignExistingWindows(\n  savedWindows: BrowserWindowSnapshot[],\n  currentWindows: browser.windows.Window[],\n): Map<number, ExistingWindowMatch> {\n  const candidateGrid = savedWindows.map((saved) =>\n    currentWindows.map((current) => buildExistingWindowMatch(saved, current)),\n  );\n  const assignment = maximumWeightAssignment(\n    candidateGrid.map((row) => row.map((candidate) => candidate?.weight ?? 0)),\n  );\n\n  const result = new Map<number, ExistingWindowMatch>();\n  assignment.forEach((currentIndex, savedIndex) => {\n    if (currentIndex === undefined) return;\n    const candidate = candidateGrid[savedIndex]?.[currentIndex];\n    if (candidate) result.set(savedIndex, candidate);\n  });\n  return result;\n}'''
-          new_assign = '''function assignExistingWindows(\n  savedWindows: BrowserWindowSnapshot[],\n  currentWindows: browser.windows.Window[],\n): Map<number, ExistingWindowMatch> {\n  const candidateGrid = savedWindows.map((saved) =>\n    currentWindows.map((current) => buildExistingWindowMatch(saved, current)),\n  );\n  const assignment = maximumWeightAssignment(\n    candidateGrid.map((row) => row.map((candidate) => candidate?.weight ?? 0)),\n  );\n\n  const result = new Map<number, ExistingWindowMatch>();\n  const usedCurrentIndexes = new Set<number>();\n  assignment.forEach((currentIndex, savedIndex) => {\n    if (currentIndex === undefined) return;\n    const candidate = candidateGrid[savedIndex]?.[currentIndex];\n    if (!candidate) return;\n    result.set(savedIndex, candidate);\n    usedCurrentIndexes.add(currentIndex);\n  });\n\n  // Reusing an unrelated nonblank window is still desirable when there is only\n  // one possible saved/live pair. Do this *after* semantic assignment and only\n  // when the fallback is unambiguous. With multiple saved windows, an arbitrary\n  // zero-overlap assignment can otherwise move the survivor into the geometry\n  // of a different saved Zen window and prevent the real missing window from\n  // being recreated.\n  const unmatchedSavedIndexes = savedWindows\n    .map((_, index) => index)\n    .filter((index) => !result.has(index));\n  const unusedCurrentIndexes = currentWindows\n    .map((_, index) => index)\n    .filter((index) => !usedCurrentIndexes.has(index));\n  if (unmatchedSavedIndexes.length === 1 && unusedCurrentIndexes.length === 1) {\n    const savedIndex = unmatchedSavedIndexes[0]!;\n    const currentIndex = unusedCurrentIndexes[0]!;\n    const saved = savedWindows[savedIndex]!;\n    const current = currentWindows[currentIndex]!;\n    if (current.id !== undefined) {\n      const similarity = savedWindowSimilarity(saved, liveTabs(current));\n      const reuse = reusableTabOverlap(saved, current);\n      result.set(savedIndex, {\n        window: current,\n        exact: similarity.exact,\n        score: similarity.score,\n        overlap: reuse.overlap,\n        savedRelevant: reuse.savedRelevant,\n        liveRelevant: reuse.liveRelevant,\n        liveSubset: reuse.liveSubset,\n        weight: 1,\n      });\n    }\n  }\n\n  return result;\n}'''
-          once(old_assign, new_assign)
-
-          once(
-              '&& !(tab.pinned && !savedTab.pinned))',
-              '&& !(IS_FIREFOX && tab.pinned && !savedTab.pinned))',
-          )
-          once(
-              '''  const protectedPinnedIds = new Set(\n    (current.tabs ?? [])\n      .filter((tab) => tab.id !== undefined && tab.pinned)\n      .map((tab) => tab.id as number),\n  );''',
-              '''  const protectedPinnedIds = IS_FIREFOX\n    ? new Set(\n        (current.tabs ?? [])\n          .filter((tab) => tab.id !== undefined && tab.pinned)\n          .map((tab) => tab.id as number),\n      )\n    : new Set<number>();''',
-          )
-          once(
-              'if ((current.tabs ?? []).some((tab) => tab.pinned)) {',
-              'if (IS_FIREFOX && (current.tabs ?? []).some((tab) => tab.pinned)) {',
-          )
-          restore_path.write_text(text, encoding='utf-8')
-
-          tests_path = Path('tests/index.ts')
-          tests = tests_path.read_text(encoding='utf-8')
-          marker = 'console.log("zero-overlap shell reuse regression test passed");\n'
-          if tests.count(marker) != 1:
-              raise SystemExit('expected the zero-overlap regression marker exactly once')
-          regression = r'''
-
-// Regression 4: mirror the real Zen failure reported in August 2026. Two Zen
-// windows were saved. The large window was closed entirely, and one ordinary
-// tab was closed from the smaller window. Shared pinned/Essential tabs are
-// visible in the surviving window, but they must not make it look like the
-// missing large saved window. The survivor belongs to the small saved window;
-// the large one must be recreated independently.
-mockWindows.splice(0, mockWindows.length, {
-  id: 40,
-  focused: true,
-  incognito: false,
-  state: "normal",
-  left: -7,
-  top: -7,
-  width: 1550,
-  height: 878,
-  tabs: [
-    liveTab(4000, 0, "https://essential-one.test", true),
-    liveTab(4001, 1, "https://essential-two.test", true),
-    liveTab(4002, 2, "https://small-a.test"),
-    liveTab(4003, 3, "https://small-c.test"),
-  ],
-});
-windowUpdates.splice(0, windowUpdates.length);
-nextTabId = 4100;
-nativeBlankCreates = 0;
-
-const sharedEssential = (index: number, url: string): BrowserTabSnapshot => ({
-  index,
-  url,
-  pinned: true,
-  active: false,
-  discarded: false,
-  muted: false,
-  restorable: true,
-});
-const zenPartialRestoreSnapshot: FirefoxSnapshot = {
-  schema_version: 1,
-  browser: "firefox",
-  extension_version: "0.1.7",
-  captured_at_unix_ms: 5,
-  skipped_private_windows: 0,
-  windows: [
-    {
-      key: "large-saved-window",
-      focused: false,
-      state: "normal",
-      left: 1900,
-      top: 100,
-      width: 1050,
-      height: 700,
-      tabs: [
-        sharedEssential(0, "https://essential-one.test"),
-        sharedEssential(1, "https://essential-two.test"),
-        savedTab(2, "https://large-a.test"),
-        savedTab(3, "https://large-b.test"),
-        savedTab(4, "https://large-c.test"),
-        savedTab(5, "https://large-d.test", true),
-      ],
-      groups: [],
-    },
-    {
-      key: "small-saved-window",
-      focused: true,
-      state: "normal",
-      left: -7,
-      top: -7,
-      width: 1550,
-      height: 878,
-      tabs: [
-        sharedEssential(0, "https://essential-one.test"),
-        sharedEssential(1, "https://essential-two.test"),
-        savedTab(2, "https://small-a.test"),
-        savedTab(3, "https://small-b.test"),
-        savedTab(4, "https://small-c.test", true),
-      ],
-      groups: [],
-    },
-  ],
-};
-
-const zenPartialReport = await restoreFirefoxSnapshot(zenPartialRestoreSnapshot, {
-  createBlankWindow: async () => {
-    nativeBlankCreates += 1;
-    mockWindows.push({
-      id: 41,
-      focused: false,
-      incognito: false,
-      state: "normal",
-      left: 2000,
-      top: 150,
-      width: 800,
-      height: 600,
-      tabs: [liveTab(4099, 0, "about:newtab")],
-    });
-    return "created";
-  },
-});
-
-assert(nativeBlankCreates === 1, "the completely closed large Zen window must be recreated exactly once");
-assert(mockWindows.length === 2, "restore should finish with the two saved Zen windows");
-assert(mockWindow(40).left === -7 && mockWindow(40).top === -7, "the surviving small window must keep the small saved window geometry instead of being moved into the large window's place");
-assert(
-  mockWindow(40).tabs.filter((tab: Record<string, any>) => !tab.pinned).map((tab: Record<string, any>) => tab.url).join("|")
-    === "https://small-a.test|https://small-b.test|https://small-c.test",
-  "the surviving small Zen window must restore its one missing ordinary tab",
-);
-assert(mockWindow(41).left === 1900 && mockWindow(41).top === 100, "the recreated large Zen window must receive the large saved geometry");
-assert(
-  mockWindow(41).tabs.some((tab: Record<string, any>) => tab.url === "https://large-d.test"),
-  "the recreated large Zen window must receive its saved ordinary tabs",
-);
-assert(zenPartialReport.reused_windows === 1, "only the surviving small window should be reused");
-assert(zenPartialReport.created_windows === 1, "the missing large window should be reported as created");
-assert(zenPartialReport.created_tabs === 7, "restore should create six tabs for the missing large window and one missing small-window tab");
-
-console.log("partial multi-window Zen restore regression test passed");
-'''
-          tests = tests.replace(marker, marker + regression, 1)
-          tests_path.write_text(tests, encoding='utf-8')
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw 'Zen restore patch script failed' }
+      - name: Apply regression patch
+        run: python scripts/apply-zen-restore-regression.py
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build:firefox
+      - run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
       - run: pnpm build:chrome
       - run: pnpm test:build-targets
-      - name: Commit verified source and test fix
+      - name: Commit only after verification passes
         shell: pwsh
         run: |
-          git rm .github/workflows/apply-chrome-pinned-restore-fix.yml
+          git rm .github/workflows/apply-chrome-pinned-restore-fix.yml scripts/apply-zen-restore-regression.py
           git add src/browser/restore.ts tests/index.ts
           git config user.name 'GPT-Slave'
           git config user.email '313162660+GPT-Slave@users.noreply.github.com'
@@ -236,13 +46,3 @@ console.log("partial multi-window Zen restore regression test passed");
           if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
           git push origin HEAD:feature/chrome-build-target-20260822
           if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
-      - name: Publish regression-fix status
-        if: always()
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          $state = if ($env:JOB_STATUS -eq 'success') { 'success' } elseif ($env:JOB_STATUS -eq 'cancelled') { 'error' } else { 'failure' }
-          $body = @{ state = $state; context = 'ci/potus-zen-partial-restore-fix'; description = "POTUS Zen partial restore fix: $($env:JOB_STATUS)" } | ConvertTo-Json
-          Invoke-RestMethod -Method Post -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } -ContentType 'application/json' -Body $body | Out-Null
