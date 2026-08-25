@@ -10,24 +10,22 @@ permissions:
 
 jobs:
   apply-and-verify:
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: [self-hosted, Linux, X64]
     steps:
-      - name: Verify POTUS runner
-        shell: pwsh
+      - name: Verify POTUS-linux runner
+        shell: bash
         run: |
-          if ('${{ runner.name }}' -ne 'POTUS') { throw "Expected runner POTUS, got '${{ runner.name }}'" }
+          set -euo pipefail
+          test '${{ runner.name }}' = 'POTUS-linux' || { echo "Expected runner POTUS-linux, got '${{ runner.name }}'" >&2; exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: feature/chrome-build-target-20260822
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - run: corepack enable
       - name: Apply regression patch
-        run: python scripts/apply-zen-restore-regression.py
+        run: python3 scripts/apply-zen-restore-regression.py
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
@@ -36,13 +34,12 @@ jobs:
       - run: pnpm build:chrome
       - run: pnpm test:build-targets
       - name: Commit only after verification passes
-        shell: pwsh
+        shell: bash
         run: |
+          set -euo pipefail
           git rm .github/workflows/apply-chrome-pinned-restore-fix.yml scripts/apply-zen-restore-regression.py
           git add src/browser/restore.ts tests/index.ts
           git config user.name 'GPT-Slave'
           git config user.email '313162660+GPT-Slave@users.noreply.github.com'
           git commit -m 'fix: restore partial Zen window topology safely'
-          if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
           git push origin HEAD:feature/chrome-build-target-20260822
-          if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
