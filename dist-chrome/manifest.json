@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Context Capsule",
+  "version": "0.1.7",
+  "description": "Capture and restore Chrome windows, tabs, and tab groups with Context Capsule.",
+  "minimum_chrome_version": "105",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA27u1KOUhHGosQHURMkVleQESeJ59Y0b6IdS44cbHOdb8yLAX2/Lp60OGxkMbbx48f8TDsEqkmeH/Ip/mU7g8mcb0m8G9ApsK+viznNsgGjz2PtwaLi1fuPno070FqTDSsbRbSpj7z+k23tgGXqDWSikTcN4eeilN+oFGdF+23kiP2RV6LVFsdtIaTTWyFyPWefGnQPHGKfz5yOxRWnBb0+ilVEyCGO4hcBRUurngfONOKpYv9SRXgpTZRwDfHv7zNi/vj2BHwxqVKkhRkPW4b4sgNktIzm+8ZqBATpg5dWZcZ222T3AgPCZQaJDax747ye+/2ZqxxgmUhwyveo+cJQIDAQAB",
+  "icons": {
+    "128": "popup/capsule-bgless.png"
+  },
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_icon": "popup/capsule-bgless.png",
+    "default_title": "Context Capsule",
+    "default_popup": "popup/popup.html"
+  }
+}
