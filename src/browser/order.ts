@@ -1,7 +1,8 @@
-import type {
-  BrowserTabSnapshot,
-  BrowserWindowSnapshot,
-  FirefoxSnapshot,
+import {
+  isDisposableBootstrapTabs,
+  type BrowserTabSnapshot,
+  type BrowserWindowSnapshot,
+  type FirefoxSnapshot,
 } from "./model";
 import { maximumWeightAssignment } from "./restore";
 
@@ -162,6 +163,65 @@ function desiredUnpinnedIds(
     .filter((id): id is number => id !== undefined);
 }
 
+function mappedTargetIds(mappedBySavedIndex: Map<number, ExtendedTab>): Set<number> {
+  return new Set(
+    [...mappedBySavedIndex.values()]
+      .map(tab => tab.id)
+      .filter((id): id is number => id !== undefined),
+  );
+}
+
+/**
+ * Return only disposable bootstrap tabs that are not part of the saved target.
+ *
+ * Zen can materialize an unpinned about:blank/about:newtab while generic tab
+ * operations are in flight. The main restore pass only knows the IDs that
+ * existed before it began, so a bootstrap created during reconciliation can
+ * survive as an extra empty tab. The final pass runs after every restore
+ * mutation and can safely remove that residue as long as:
+ * - at least one mapped saved target is present;
+ * - the candidate is not one of those mapped targets;
+ * - the candidate is unpinned (never touch a Zen Essential/pinned tab); and
+ * - the candidate is exactly a disposable browser bootstrap shape.
+ *
+ * A blank/new-tab that was actually saved maps to a target ID and is therefore
+ * intentionally preserved.
+ */
+function unexpectedDisposableTabIds(
+  tabs: ExtendedTab[],
+  targetIds: ReadonlySet<number>,
+): number[] {
+  if (targetIds.size === 0) return [];
+  const hasMappedTarget = tabs.some(tab => tab.id !== undefined && targetIds.has(tab.id));
+  if (!hasMappedTarget) return [];
+
+  return tabs
+    .filter(tab =>
+      tab.id !== undefined
+      && !targetIds.has(tab.id)
+      && !tab.pinned
+      && isDisposableBootstrapTabs([tab]),
+    )
+    .map(tab => tab.id as number);
+}
+
+async function removeUnexpectedDisposableTabs(
+  windowId: number,
+  mappedBySavedIndex: Map<number, ExtendedTab>,
+): Promise<number> {
+  const targetIds = mappedTargetIds(mappedBySavedIndex);
+  if (targetIds.size === 0) return 0;
+  const tabs = await liveWindowTabs(windowId);
+  if (!tabs) return 0;
+  const ids = unexpectedDisposableTabIds(tabs, targetIds);
+  let removed = 0;
+  for (const id of ids) {
+    const ok = await browser.tabs.remove(id).then(() => true).catch(() => false);
+    if (ok) removed += 1;
+  }
+  return removed;
+}
+
 function buildSavedBlocks(
   saved: BrowserWindowSnapshot,
   mappedBySavedIndex: Map<number, ExtendedTab>,
@@ -311,6 +371,11 @@ export async function enforceFinalTabOrder(snapshot: FirefoxSnapshot): Promise<F
     }
     const windowId = match.window.id;
 
+    // Remove only unsaved disposable tabs after all restore mutations have
+    // completed. This catches Zen-created transient about:blank tabs that did
+    // not exist when the main restore pass captured its original tab IDs.
+    await removeUnexpectedDisposableTabs(windowId, match.mappedBySavedIndex);
+
     const desiredIds = desiredUnpinnedIds(saved, match.mappedBySavedIndex);
     const before = await liveWindowTabs(windowId);
     if (!before) {
@@ -335,4 +400,5 @@ export async function enforceFinalTabOrder(snapshot: FirefoxSnapshot): Promise<F
 export const finalOrderTestHelpers = {
   exactRelativeOrder,
   buildSavedBlocks,
+  unexpectedDisposableTabIds,
 };
