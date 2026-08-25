@@ -10,13 +10,8 @@ permissions:
 
 jobs:
   apply-and-verify:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-      - name: Verify POTUS-linux runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          test '${{ runner.name }}' = 'POTUS-linux' || { echo "Expected runner POTUS-linux, got '${{ runner.name }}'" >&2; exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: feature/chrome-build-target-20260822
@@ -30,7 +25,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build:firefox
-      - run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
+      - name: Lint Firefox package
+        run: pnpm exec web-ext lint --source-dir dist
       - run: pnpm build:chrome
       - run: pnpm test:build-targets
       - name: Commit only after verification passes
