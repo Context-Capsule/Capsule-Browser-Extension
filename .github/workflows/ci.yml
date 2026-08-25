@@ -33,7 +33,7 @@ jobs:
       - name: Build Firefox target
         run: pnpm build:firefox
       - name: Lint Firefox target
-        run: pnpm exec web-ext lint --source-dir dist
+        run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
       - name: Build Chrome target
         run: pnpm build:chrome
       - name: Verify target isolation
@@ -68,7 +68,7 @@ jobs:
       - name: Build Firefox target
         run: pnpm build:firefox
       - name: Lint Firefox target
-        run: pnpm exec web-ext lint --source-dir dist
+        run: pnpm exec web-ext lint --source-dir dist --warnings-as-errors
       - name: Build Chrome target
         run: pnpm build:chrome
       - name: Verify target isolation
