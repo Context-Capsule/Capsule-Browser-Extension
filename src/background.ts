@@ -1,4 +1,4 @@
-import { captureFirefoxSnapshot } from "./browser/capture";
+import { captureBrowserSnapshot } from "./browser/capture";
 import { enforceFinalTabOrder } from "./browser/order";
 import { restoreFirefoxSnapshot } from "./browser/restore";
 import {
@@ -6,6 +6,11 @@ import {
   type FirefoxSnapshot,
   type RestoreReport,
 } from "./browser/model";
+import {
+  BROWSER_ADAPTER_ID,
+  BROWSER_LABEL,
+  IS_FIREFOX,
+} from "./platform";
 import { NativeClient, type NativeClientStatus, type NativeLogLevel } from "./native/client";
 import type { RestoreRequest } from "./native/protocol";
 
@@ -20,6 +25,10 @@ interface ExtensionStatus {
   restoring: boolean;
   last_error?: string;
   last_restore?: RestoreReport;
+}
+
+interface MessageErrorEnvelope {
+  __context_capsule_error: string;
 }
 
 type PopupMessage =
@@ -46,7 +55,7 @@ const native = new NativeClient((status) => {
   const wasConnected = nativeStatus.connected;
   nativeStatus = status;
   if (status.connected && !wasConnected) {
-    queueMicrotask(() => persistDiagnostic("info", "Firefox adapter connected to native host"));
+    queueMicrotask(() => persistDiagnostic("info", `${BROWSER_LABEL} adapter connected to native host`));
   }
 });
 
@@ -93,7 +102,7 @@ async function syncSnapshot(reason: SyncReason = "automatic"): Promise<Extension
   if (syncing || restoring) return status();
   syncing = true;
   try {
-    const snapshot = await captureFirefoxSnapshot();
+    const snapshot = await captureBrowserSnapshot();
     latestSnapshot = snapshot;
     await native.updateState(snapshot);
     lastSyncUnixMs = Date.now();
@@ -101,11 +110,11 @@ async function syncSnapshot(reason: SyncReason = "automatic"): Promise<Extension
     if (reason !== "automatic") {
       persistDiagnostic(
         "info",
-        `Firefox semantic capture completed; reason=${reason} install_type=${snapshot.install_type ?? "unknown"} windows=${snapshot.windows.length} tabs=${tabCount(snapshot)} private_skipped=${snapshot.skipped_private_windows}`,
+        `${BROWSER_LABEL} semantic capture completed; reason=${reason} install_type=${snapshot.install_type ?? "unknown"} windows=${snapshot.windows.length} tabs=${tabCount(snapshot)} private_skipped=${snapshot.skipped_private_windows}`,
       );
     }
   } catch (error) {
-    recordError(`Firefox semantic capture failed; reason=${reason}`, error);
+    recordError(`${BROWSER_LABEL} semantic capture failed; reason=${reason}`, error);
   } finally {
     syncing = false;
   }
@@ -122,9 +131,11 @@ function scheduleSync(delay = 500, reason: SyncReason = "automatic"): void {
 }
 
 function restoreOptions() {
-  return {
-    createBlankWindow: () => native.createBlankBrowserWindow(),
-  };
+  // The native blank-window fallback exists only for Zen. Chrome and ordinary
+  // Firefox use the standard WebExtension windows API.
+  return IS_FIREFOX
+    ? { createBlankWindow: () => native.createBlankBrowserWindow() }
+    : {};
 }
 
 function restoreSummary(report: RestoreReport): string {
@@ -148,14 +159,13 @@ async function finalizeTabOrder(snapshot: FirefoxSnapshot, report: RestoreReport
  * state, and geometry have finished, so no later semantic browser operation can
  * silently disturb the saved tab sequence.
  *
- * Split restoration is intentionally disabled for now. Capture keeps the split
- * metadata, but restore does not select tabs or invoke Zen split commands while
- * that integration is being investigated separately.
+ * Zen split restoration remains intentionally disabled. Chrome never enters
+ * the Zen-specific split/native-window paths.
  */
 async function prepareAuthoritativeRestore(snapshot: FirefoxSnapshot): Promise<FirefoxSnapshot> {
   persistDiagnostic(
     "info",
-    `Authoritative Zen restore delegated to global reuse planner; saved_windows=${snapshot.windows.length} saved_tabs=${tabCount(snapshot)}`,
+    `${BROWSER_LABEL} authoritative restore delegated to global reuse planner; saved_windows=${snapshot.windows.length} saved_tabs=${tabCount(snapshot)}`,
   );
   return snapshot;
 }
@@ -165,18 +175,21 @@ async function restoreCapsule(name: string): Promise<ExtensionStatus> {
   if (!trimmed) throw new Error("Enter a capsule name to restore");
   restoring = true;
   clearError();
-  persistDiagnostic("info", "Popup-requested Firefox semantic restore started");
+  persistDiagnostic("info", `Popup-requested ${BROWSER_LABEL} semantic restore started`);
   try {
     const snapshot = await native.getCapsule(trimmed);
+    if (snapshot.browser !== BROWSER_ADAPTER_ID) {
+      throw new Error(`Capsule returned ${snapshot.browser} state to the ${BROWSER_ADAPTER_ID} adapter`);
+    }
     const prepared = await prepareAuthoritativeRestore(snapshot);
     lastRestore = await restoreFirefoxSnapshot(prepared, restoreOptions());
     await finalizeTabOrder(prepared, lastRestore);
     persistDiagnostic(
       lastRestore.warnings.length > 0 ? "warn" : "info",
-      `Popup-requested Firefox semantic restore completed; ${restoreSummary(lastRestore)}`,
+      `Popup-requested ${BROWSER_LABEL} semantic restore completed; ${restoreSummary(lastRestore)}`,
     );
   } catch (error) {
-    recordError("Popup-requested Firefox semantic restore failed", error);
+    recordError(`Popup-requested ${BROWSER_LABEL} semantic restore failed`, error);
     throw error;
   } finally {
     restoring = false;
@@ -193,12 +206,15 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
   let restoreError: string | undefined;
   persistDiagnostic(
     "info",
-    `CLI-requested Firefox semantic restore started; windows=${request.payload.windows.length} tabs=${tabCount(request.payload)}`,
+    `CLI-requested ${BROWSER_LABEL} semantic restore started; windows=${request.payload.windows.length} tabs=${tabCount(request.payload)}`,
   );
 
   try {
-    if (request.adapter !== "firefox" || request.schema_version !== 1) {
-      throw new Error("Unsupported Context Capsule Firefox restore request");
+    if (request.adapter !== BROWSER_ADAPTER_ID || request.schema_version !== 1) {
+      throw new Error(`Unsupported Context Capsule ${BROWSER_LABEL} restore request`);
+    }
+    if (request.payload.browser !== BROWSER_ADAPTER_ID) {
+      throw new Error(`Restore payload belongs to '${request.payload.browser}', not '${BROWSER_ADAPTER_ID}'`);
     }
     const prepared = await prepareAuthoritativeRestore(request.payload);
     report = await restoreFirefoxSnapshot(prepared, restoreOptions());
@@ -206,14 +222,14 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     lastRestore = report;
     persistDiagnostic(
       report.warnings.length > 0 ? "warn" : "info",
-      `CLI-requested Firefox semantic restore applied; ${restoreSummary(report)}`,
+      `CLI-requested ${BROWSER_LABEL} semantic restore applied; ${restoreSummary(report)}`,
     );
   } catch (error) {
-    restoreError = recordError("CLI-requested Firefox semantic restore failed", error);
+    restoreError = recordError(`CLI-requested ${BROWSER_LABEL} semantic restore failed`, error);
   }
 
   try {
-    const snapshot = await captureFirefoxSnapshot();
+    const snapshot = await captureBrowserSnapshot();
     latestSnapshot = snapshot;
     const completion: {
       requestId: string;
@@ -226,7 +242,7 @@ async function completeNativeRestore(request: RestoreRequest): Promise<void> {
     lastSyncUnixMs = Date.now();
     lastHandledRestoreRequestId = request.request_id;
   } catch (completionError) {
-    recordError("Firefox restore completion synchronization failed", completionError);
+    recordError(`${BROWSER_LABEL} restore completion synchronization failed`, completionError);
   } finally {
     restoring = false;
   }
@@ -238,24 +254,56 @@ async function pollNativeRestore(): Promise<void> {
     const request = await native.pollRestoreRequest();
     if (request) await completeNativeRestore(request);
   } catch {
-    // NativeClient owns connection/reconnect status. A transient poll failure should
-    // not overwrite the user's last semantic restore error every second.
+    // NativeClient owns connection/reconnect status. A transient poll failure
+    // must not replace the last semantic restore error.
   }
 }
 
-browser.runtime.onMessage.addListener((message: unknown) => {
-  const request = message as Partial<PopupMessage>;
-  switch (request.type) {
-    case "status":
-      return Promise.resolve(status());
-    case "capture-now":
-      return syncSnapshot("manual");
-    case "restore-capsule":
-      return restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "");
-    default:
-      return undefined;
-  }
-});
+function messageError(error: unknown): MessageErrorEnvelope {
+  return {
+    __context_capsule_error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+if (IS_FIREFOX) {
+  // Preserve the already-proven Firefox/Zen message boundary exactly. Firefox
+  // supports promise-returning onMessage listeners, so the existing popup
+  // behavior remains unchanged on the default build target.
+  browser.runtime.onMessage.addListener((message: unknown) => {
+    const request = message as Partial<PopupMessage>;
+    switch (request.type) {
+      case "status":
+        return Promise.resolve(status());
+      case "capture-now":
+        return syncSnapshot("manual");
+      case "restore-capsule":
+        return restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "");
+      default:
+        return undefined;
+    }
+  });
+} else {
+  // Promise-returning runtime.onMessage listeners are only natively supported
+  // by Chrome starting with Chrome 148. The callback form works across MV3
+  // Chrome releases and keeps this build compatible with Chrome 105+.
+  browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    const request = message as Partial<PopupMessage>;
+    switch (request.type) {
+      case "status":
+        sendResponse(status());
+        return false;
+      case "capture-now":
+        void syncSnapshot("manual").then(sendResponse, (error) => sendResponse(messageError(error)));
+        return true;
+      case "restore-capsule":
+        void restoreCapsule((request as { capsule_name?: string }).capsule_name ?? "")
+          .then(sendResponse, (error) => sendResponse(messageError(error)));
+        return true;
+      default:
+        return false;
+    }
+  });
+}
 
 browser.tabs.onCreated.addListener(() => scheduleSync());
 browser.tabs.onRemoved.addListener(() => scheduleSync());
@@ -280,6 +328,10 @@ for (const event of [maybeGroups?.onCreated, maybeGroups?.onMoved, maybeGroups?.
   event?.addListener(() => scheduleSync());
 }
 
+// connectNative keeps Chrome MV3's service worker alive while the native port
+// is open (Chrome 105+). Firefox keeps the existing persistent background
+// behavior. If the host is absent, ordinary browser events/popup interaction
+// will restart the worker and retry the connection.
 native.connect();
 scheduleSync(100, "startup");
 setInterval(() => scheduleSync(0), 30_000);

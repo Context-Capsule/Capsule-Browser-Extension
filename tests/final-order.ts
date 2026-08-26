@@ -15,6 +15,7 @@ const windowId = 10;
 let tabs: LiveTab[] = [];
 let batchMoves: number[][] = [];
 let groupMoves: number[] = [];
+let removedIds: number[] = [];
 
 function normalize(): void {
   tabs.forEach((tab, index) => {
@@ -22,13 +23,13 @@ function normalize(): void {
   });
 }
 
-function setTabs(entries: Array<{ id: number; url: string; groupId?: number }>): void {
+function setTabs(entries: Array<{ id: number; url: string; groupId?: number; pinned?: boolean }>): void {
   tabs = entries.map((entry, index) => ({
     id: entry.id,
     windowId,
     index,
     url: entry.url,
-    pinned: false,
+    pinned: entry.pinned ?? false,
     active: index === 0,
     highlighted: index === 0,
     incognito: false,
@@ -38,6 +39,7 @@ function setTabs(entries: Array<{ id: number; url: string; groupId?: number }>):
   }));
   batchMoves = [];
   groupMoves = [];
+  removedIds = [];
 }
 
 function moveIds(ids: number[], index: number): void {
@@ -92,6 +94,13 @@ function moveIds(ids: number[], index: number): void {
       moveIds(ids, properties.index);
       return ids.map(id => ({ ...tabs.find(tab => tab.id === id)! }));
     },
+    remove: async (tabIds: number | number[]) => {
+      const ids = Array.isArray(tabIds) ? [...tabIds] : [tabIds];
+      removedIds.push(...ids);
+      const idSet = new Set(ids);
+      tabs = tabs.filter(tab => !idSet.has(tab.id));
+      normalize();
+    },
   },
   tabGroups: {
     move: async (groupId: number, properties: { index: number; windowId?: number }) => {
@@ -104,10 +113,10 @@ function moveIds(ids: number[], index: number): void {
   },
 };
 
-const { enforceFinalTabOrder } = await import("../src/browser/order");
+const { enforceFinalTabOrder, finalOrderTestHelpers } = await import("../src/browser/order");
 
 function snapshot(
-  saved: Array<{ id: number; url: string; groupKey?: string }>,
+  saved: Array<{ id: number; url: string; groupKey?: string; pinned?: boolean }>,
 ): FirefoxSnapshot {
   return {
     schema_version: 1,
@@ -126,7 +135,7 @@ function snapshot(
       tabs: saved.map((entry, index) => ({
         index,
         url: entry.url,
-        pinned: false,
+        pinned: entry.pinned ?? false,
         active: index === 0,
         discarded: false,
         muted: false,
@@ -195,5 +204,43 @@ setTabs(savedPlain);
 result = await enforceFinalTabOrder(snapshot(savedPlain));
 assert.equal(result.correctedWindows, 0, "already-correct order must be a no-op");
 assert.deepEqual(batchMoves, [], "already-correct tabs must not move");
+assert.deepEqual(removedIds, [], "already-correct target tabs must not be removed");
+
+// Regression: Zen may materialize a bootstrap blank while restore operations
+// are in flight. It did not exist in the initial live-tab inventory, so the main
+// restore cleanup could not know its ID. The final pass must remove that one
+// transient without touching any saved target.
+const transientBlank = { id: 90, url: "about:blank" };
+setTabs([A, B, C, D, transientBlank]);
+result = await enforceFinalTabOrder(snapshot(savedPlain));
+assert.deepEqual(urls(), savedPlain.map(tab => tab.url), "unsaved transient blank must be removed after restore");
+assert.deepEqual(removedIds, [transientBlank.id], "only the transient blank should be removed");
+assert.equal(result.correctedWindows, 0, "blank cleanup alone must not masquerade as an ordering correction");
+
+// Counter-regression: an about:blank that genuinely belonged to the saved
+// capsule is a mapped target and must survive the same finalizer.
+const savedBlank = { id: 91, url: "about:blank" };
+setTabs([A, savedBlank]);
+result = await enforceFinalTabOrder(snapshot([A, savedBlank]));
+assert.deepEqual(urls(), [A.url, savedBlank.url], "a saved blank target must be preserved");
+assert.deepEqual(removedIds, [], "saved blank target must never be treated as transient residue");
+
+// Pinned blanks are also never disposable here; Zen can hide Essential state
+// behind an otherwise ordinary-looking pinned tab.
+const pinnedBlank = { id: 92, url: "about:blank", pinned: true };
+setTabs([A, pinnedBlank]);
+result = await enforceFinalTabOrder(snapshot([A]));
+assert.deepEqual(removedIds, [], "pinned/Essential-like blank tabs must remain protected");
+
+const helperTabs = [
+  { id: 100, index: 0, url: A.url, pinned: false },
+  { id: 101, index: 1, url: "about:newtab", pinned: false },
+  { id: 102, index: 2, url: "https://unrelated.test/", pinned: false },
+] as any[];
+assert.deepEqual(
+  finalOrderTestHelpers.unexpectedDisposableTabIds(helperTabs, new Set([100])),
+  [101],
+  "pure cleanup selector must reject real unrelated user content",
+);
 
 console.log("authoritative final tab-order regressions passed");

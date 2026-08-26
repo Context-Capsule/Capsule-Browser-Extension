@@ -1,13 +1,13 @@
-import type { FirefoxSnapshot } from "../browser/model";
-import type { BrowserSplitOrientation } from "../browser/model";
+import { BROWSER_ADAPTER_ID, NATIVE_HOST_NAME as TARGET_NATIVE_HOST_NAME } from "../platform";
+import type { BrowserAdapterId, BrowserSplitOrientation, FirefoxSnapshot } from "../browser/model";
 
-export const NATIVE_HOST_NAME = "com.contextcapsule.host";
+export const NATIVE_HOST_NAME = TARGET_NATIVE_HOST_NAME;
 export const NATIVE_PROTOCOL_VERSION = 1 as const;
 
 export interface RestoreRequest {
   schema_version: 1;
   request_id: string;
-  adapter: "firefox";
+  adapter: BrowserAdapterId;
   created_at_unix_ms: number;
   payload: FirefoxSnapshot;
 }
@@ -65,6 +65,8 @@ export interface NativeResponse {
   host_version?: string;
   restore_request?: RestoreRequest;
 }
+
+export const CURRENT_ADAPTER_ID: BrowserAdapterId = BROWSER_ADAPTER_ID;
 
 export function requestId(): string {
   return `${Date.now().toString(36)}-${crypto.randomUUID()}`;

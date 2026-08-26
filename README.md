@@ -1,82 +1,200 @@
-# Context Capsule Firefox Extension
+# Context Capsule Browser Extension
 
-Firefox/Zen WebExtension adapter for Context Capsule. It captures normal browser windows, tab URLs/order, pinned and active tabs, portable tab groups, Zen split-view relationships, container IDs, discarded/muted state, and browser-window geometry/state. Private windows are intentionally excluded.
+Shared WebExtension adapter for Context Capsule. The same TypeScript capture/restore core now builds for **Firefox/Zen** and **Google Chrome** without forking the tab/window restore engine.
 
-The extension communicates with the `capsule-firefox-host` native messaging binary from the `Context-Capsule/Capsule-CLI` repository using the host name `com.contextcapsule.host`.
+It captures normal browser windows, tab URLs/order, pinned and active tabs, portable tab groups, discarded/muted state, and browser-window geometry/state. Firefox/Zen additionally preserves Firefox container IDs and captures Zen split-view relationships. Private/incognito windows are intentionally excluded.
 
-## Development
+## Build targets
+
+Firefox remains the default build and keeps the existing output path and manifest semantics:
 
 ```bash
 pnpm install
-pnpm check
-pnpm dev
+pnpm build
+# equivalent:
+pnpm build:firefox
 ```
 
-`pnpm dev` watches/builds the extension for loading through `about:debugging`. A temporary development add-on is useful for fast iteration, but Firefox/Zen removes it when the browser fully exits. That means it can test **warm restore** (the browser stays running), but it cannot by itself test **cold-browser restore** after all browser windows/processes have exited.
+Output:
 
-The popup reports the extension installation type. If it shows the temporary-development warning, do not expect the adapter to survive a full browser restart.
+```text
+dist/
+```
 
-For a persistent-installation artifact:
+The Firefox artifact still uses:
+
+- Gecko extension ID `firefox@contextcapsule.app`
+- native host `com.contextcapsule.host`
+- Firefox MV3 `background.scripts`
+- Firefox container/cookie-store metadata
+
+Chrome is an additive build target:
 
 ```bash
-pnpm package
+pnpm build:chrome
 ```
 
-This creates an XPI under `web-ext-artifacts/`. Install/sign that package using a persistent installation method supported by the target Firefox/Zen build. Do not modify the browser installation or profile internals just to bypass extension-signing/security policy.
+Output:
 
-Before native messaging can connect, build and install the native host from Capsule-CLI:
+```text
+dist-chrome/
+```
+
+The Chrome artifact uses:
+
+- Chrome MV3 `background.service_worker`
+- native host `com.contextcapsule.chrome`
+- deterministic unpacked extension ID `gmffhdppfaeonombpbbgnldagfeabiof`
+- tabs, tab groups, and native messaging without Firefox container fields
+
+Build both:
+
+```bash
+pnpm build:all
+```
+
+Run the complete regression suite, including both target artifacts:
+
+```bash
+pnpm check
+```
+
+`pnpm check` still runs the existing Firefox/Zen tests and Firefox `web-ext lint`, then builds Chrome and verifies that the emitted manifests/bundles remain isolated from one another.
+
+## Native messaging hosts
+
+The two browser families deliberately use separate host registrations so Chrome support cannot change the working Firefox registration.
+
+### Firefox / Zen
 
 ```powershell
 cargo build --bin capsule-firefox-host
 cargo run --bin capsule-firefox-host -- --install
+cargo run --bin capsule-firefox-host -- --doctor
 ```
 
-Then restart/reload the extension so it sees the native host registration.
+Host name:
+
+```text
+com.contextcapsule.host
+```
+
+### Chrome
+
+```powershell
+cargo build --bin capsule-chrome-host
+cargo run --bin capsule-chrome-host -- --install
+cargo run --bin capsule-chrome-host -- --doctor
+```
+
+Host name:
+
+```text
+com.contextcapsule.chrome
+```
+
+On Windows the Chrome host registers under Google Chrome's `NativeMessagingHosts` registry path and authorizes only the deterministic Context Capsule Chrome extension origin.
+
+## Loading the Chrome development build
+
+1. Run `pnpm build:chrome`.
+2. Open `chrome://extensions`.
+3. Enable **Developer mode**.
+4. Choose **Load unpacked**.
+5. Select `dist-chrome/`.
+6. Confirm the extension ID is `gmffhdppfaeonombpbbgnldagfeabiof`.
+7. Install/verify `capsule-chrome-host` as shown above.
+8. Open the Context Capsule popup; it should report **Chrome workspace adapter** and **Connected**.
+
+The fixed development key is public extension metadata, not a signing/private key. It exists so an unpacked build keeps the same Chrome extension ID and can safely match the native host's `allowed_origins` entry.
+
+## Firefox / Zen development
+
+```bash
+pnpm dev
+```
+
+`pnpm dev` intentionally remains Firefox/Zen-oriented and continues building `dist/` for `about:debugging`. It does not launch or modify the user's browser profile.
+
+A temporary development add-on is useful for warm restore, but Firefox/Zen removes it when the browser fully exits. Cold-browser restore therefore requires a persistent extension installation.
+
+For a persistent Firefox artifact:
+
+```bash
+pnpm package
+# or
+pnpm package:firefox
+```
+
+This creates an XPI under `web-ext-artifacts/`. Install/sign it through a persistent installation method supported by the target Firefox/Zen build.
+
+## Browser-specific behavior
+
+### Shared
+
+Both targets use the same code for:
+
+- browser window capture and geometry;
+- URL/title/pinned/active/muted/discarded tab state;
+- exact saved tab ordering;
+- standard tab-group capture/restore;
+- global saved-window/live-window reuse assignment;
+- final authoritative tab-order verification;
+- native restore-bus synchronization.
+
+### Firefox / Zen only
+
+Firefox/Zen keeps:
+
+- `cookieStoreId` / container identity;
+- Zen Essential/pinned-tab protection behavior;
+- Zen split relationship capture;
+- the Zen native blank-window fallback used by the proven restore path.
+
+Automatic Zen split reconstruction remains intentionally disabled. Split metadata is retained, but restore does not select split members or invoke Zen split shortcuts.
+
+### Chrome only
+
+Chrome deliberately does **not** receive Firefox `cookieStoreId` fields. Chrome also supports legitimate unnamed tab groups, so an empty Chrome group title is preserved as a normal group rather than being interpreted as a Zen split marker.
+
+Chrome uses the standard extension `windows.create()` path; it never calls the Zen native blank-window or split commands.
+
+## Capsule storage
+
+The CLI keeps browser states independent:
+
+```json
+{
+  "browsers": {
+    "firefox": { "browser": "firefox" },
+    "chrome": { "browser": "chrome" }
+  }
+}
+```
+
+`browsers.chrome` is added only when a recent Chrome adapter state exists. Firefox-only machines/capsules therefore keep the historical payload shape. A capsule may contain both browser snapshots and the CLI restores each through its own native host/restore-bus channel.
 
 ## Persistent diagnostics
 
-High-value capture/restore lifecycle events are forwarded through native messaging to the CLI-owned persistent log. The WebExtension itself never needs direct filesystem access.
+High-value lifecycle events are forwarded through native messaging to CLI-owned rotating logs.
 
 On Windows:
 
 ```text
 %LOCALAPPDATA%\ContextCapsule\logs\firefox.log
-%LOCALAPPDATA%\ContextCapsule\logs\firefox.log.1
+%LOCALAPPDATA%\ContextCapsule\logs\chrome.log
 ```
 
-Diagnostics include events such as native-host connection, startup/manual capture counts, extension installation type, restore start/completion, changed/reused resource counts, final tab-order corrections, warning counts, and deduplicated failures. They deliberately avoid persisting captured tab URLs as diagnostic payloads.
-
-The CLI native host bounds and rotates these logs. Logging is fail-open: inability to write a diagnostic must not make capture or restore fail.
-
-## Manual end-to-end test
-
-1. Start Zen with the persistently installed extension and current native host.
-2. Open at least four ordinary tabs in a memorable order, for example `A, B, C, D`. A named Firefox tab group may be included to exercise block-aware ordering.
-3. Open the Context Capsule toolbar popup. It should report `Connected`, the correct window/tab counts, and whether the extension is a temporary development install.
-4. Click **Sync now**.
-5. In Capsule-CLI, run `cargo run -- save order-test1` and then `cargo run -- show order-test1 --json`; the Firefox snapshot should preserve each tab's index.
-6. Deliberately scramble the live tabs, especially the edges: for example change `A, B, C, D` to `B, A, D, C`, or reverse the whole sequence.
-7. Run `cargo run -- restore order-test1`. Context Capsule should globally reuse the best live windows/tabs, complete missing tabs, restore groups and geometry, and then run one final authoritative ordering pass. The ordinary tabs must finish in exactly `A, B, C, D` relative order.
-8. Inspect `firefox.log` if capture or restore is partial. A failed final-order convergence is reported explicitly rather than silently accepted.
-
-For a **cold-browser** test, use a persistently installed Context Capsule extension. Capsule-CLI opens a real bootstrap browser window/tab so WebExtensions and native messaging can start even when no Zen windows were open. The restore bus request/completion is the authoritative adapter handshake; the bootstrap is only startup state and is eligible for reuse by the same global restore planner.
+Diagnostics include native-host connection, capture counts, installation type, restore start/completion, changed/reused resource counts, final ordering corrections, warning counts, and failures. Captured tab URLs are not persisted as diagnostic payloads.
 
 ## Restore semantics and safety
 
-The capsule is the target state rather than an additive suggestion. Before creating anything, the adapter inspects all live non-private browser windows and computes a global maximum-reuse assignment against all saved windows. The leading objective is the total number of already-open saved tabs that can be retained across the complete restore. Ties favor exact or subset semantic matches, then inexpensive shells with less unrelated state, then saved geometry. A usable live window with no matching tabs is still preferred over creating another window when the saved topology needs a shell.
+The capsule is the target state rather than an additive browser suggestion. Before creating anything, the shared restore core inspects live non-private windows and computes a global maximum-reuse assignment against all saved windows.
 
-For each assigned live window, matching tabs are retained in place, missing restorable tabs are created, mute/active state and named tab groups are reconciled, ordinary tabs outside the capsule are removed only after target tabs safely exist, and the saved window geometry/state is restored.
+For each assigned window, matching tabs are retained, missing restorable tabs are created, mute/active state and portable groups are reconciled, ordinary live extras are removed only after target tabs safely exist, and saved geometry/state is restored.
 
-Tab order has an additional final-authority phase after all of those operations. The verifier sorts live tabs by their actual `tab.index`; it never trusts array iteration order. For ordinary ungrouped target tabs, the adapter sends the entire saved tab-ID sequence to one `tabs.move()` call at the first-unpinned boundary, avoiding sequential index-shift races. If groups are present, saved groups are treated as blocks and moved from right to left; real groups use `tabGroups.move()` where possible so their member order and grouping are not destroyed. The result is re-read and compared against the exact saved relative ID sequence, with bounded retries and an explicit warning if the browser refuses to converge.
+Tab order has an additional final-authority phase after semantic mutation. The verifier reads each tab's actual `tab.index`. Ordinary ungrouped target tabs are moved as one ordered ID sequence rather than through sequential index-shifting moves. Grouped tabs are moved as blocks and real groups use `tabGroups.move()` where available. The final state is re-read and verified with bounded retries.
 
-### Zen split views
+Original live windows outside the assignment are cleaned up only after the saved topology has been restored, and only when existing protected pinned state does not make that destructive. If a saved window fails to restore, unrelated live windows are preserved as recovery state.
 
-Zen split relationships are still captured so a capsule does not lose the information. Automatic split reconstruction is intentionally disabled in the current restore path while the Zen-specific invocation mechanism is investigated. Restore therefore does not select split members or send Zen split shortcuts after the final tab-order phase.
-
-Split markers remain non-portable group metadata and are never synthesized as ordinary named Firefox groups. Tabs that belonged to a saved split are restored as ordinary tabs in their saved relative order for now.
-
-Original live windows outside the assignment are cleaned up only after the complete saved topology has been restored, and only when they contain no pre-existing pinned tabs. If any saved window fails to restore, unrelated live windows are preserved as recovery state rather than being destructively removed during a partial restore.
-
-Privileged Firefox URLs such as `about:config`, extension URLs, and local `file:` URLs are retained as non-restorable context but are **not reopened** during semantic restore. If the exact privileged tab is already open in an assigned window, it can be retained in place.
-
-Maximized/fullscreen windows are staged onto the saved monitor before their non-normal state is applied. Named Firefox tab groups remain portable groups; Zen split markers are captured but currently left unapplied during restore.
+Privileged browser URLs and local files are retained as non-restorable context but are not reopened. If an exact privileged tab is already open in an assigned window, it may be retained in place.

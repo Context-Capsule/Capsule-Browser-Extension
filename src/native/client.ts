@@ -1,3 +1,4 @@
+import { IS_FIREFOX } from "../platform";
 import {
   NATIVE_HOST_NAME,
   NATIVE_PROTOCOL_VERSION,
@@ -98,11 +99,12 @@ export class NativeClient {
       type: "browser.capsule.get",
       capsule_name: name,
     });
-    if (!response.snapshot) throw new Error("Native host returned no Firefox snapshot");
+    if (!response.snapshot) throw new Error("Native host returned no browser snapshot");
     return response.snapshot;
   }
 
   async createBlankBrowserWindow(): Promise<BlankBrowserWindowResult> {
+    if (!IS_FIREFOX) return "unsupported";
     try {
       await this.request({
         protocol_version: NATIVE_PROTOCOL_VERSION,
@@ -117,15 +119,11 @@ export class NativeClient {
     }
   }
 
-  /**
-   * Split invocation deliberately uses a one-shot native-message process rather
-   * than the long-lived adapter port. During development the CLI/native-host
-   * binary is rebuilt in place; an already connected host can therefore remain
-   * an older executable in memory even though the file on disk is current.
-   * A fresh process makes the command path deterministic without disrupting the
-   * persistent state/capture connection.
-   */
+  /** Zen-only compatibility command. Split restore is currently disabled. */
   async invokeZenSplit(orientation: BrowserSplitOrientation): Promise<void> {
+    if (!IS_FIREFOX) {
+      throw new Error("Zen split commands are unavailable in the Chrome adapter");
+    }
     const request: NativeRequest = {
       protocol_version: NATIVE_PROTOCOL_VERSION,
       request_id: requestId(),

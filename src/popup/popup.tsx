@@ -1,6 +1,7 @@
 import { Glass } from "@samasante/liquid-glass";
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { BROWSER_LABEL, NATIVE_HOST_BINARY } from "../platform";
 
 interface PopupStatus {
   native: { connected: boolean; host_version?: string; last_error?: string };
@@ -22,15 +23,30 @@ interface PopupStatus {
   };
 }
 
+interface MessageErrorEnvelope {
+  __context_capsule_error: string;
+}
+
+function isMessageError(value: unknown): value is MessageErrorEnvelope {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && "__context_capsule_error" in value
+    && typeof (value as MessageErrorEnvelope).__context_capsule_error === "string",
+  );
+}
+
 async function request<T>(message: unknown): Promise<T> {
-  return browser.runtime.sendMessage(message) as Promise<T>;
+  const response = await browser.runtime.sendMessage(message) as T | MessageErrorEnvelope;
+  if (isMessageError(response)) throw new Error(response.__context_capsule_error);
+  return response as T;
 }
 
 function details(status: PopupStatus): string[] {
   const messages: string[] = [];
   if (status.last_sync_unix_ms) messages.push(`Synced ${new Date(status.last_sync_unix_ms).toLocaleTimeString()}`);
   if (status.install_type === "development") {
-    messages.push("Temporary development install: a full browser quit unloads this adapter. Cold-browser restore requires a persistent extension installation.");
+    messages.push("Development install: a full browser quit can unload this adapter. Cold-browser restore requires a persistent extension installation.");
   }
   if (status.skipped_private_windows > 0) messages.push(`${status.skipped_private_windows} private window(s) intentionally skipped`);
   if (status.native.host_version) messages.push(`Host ${status.native.host_version}`);
@@ -47,7 +63,7 @@ function details(status: PopupStatus): string[] {
   }
   if (!status.native.connected) {
     if (status.native.last_error) messages.push(`Native messaging: ${status.native.last_error}`);
-    messages.push("Native host setup is required once. In Capsule-CLI run capsule-firefox-host --install, then --doctor.");
+    messages.push(`Native host setup is required once. In Capsule-CLI run ${NATIVE_HOST_BINARY} --install, then --doctor.`);
   }
   if (status.last_error && status.last_error !== status.native.last_error) messages.push(status.last_error);
   return messages;
@@ -117,7 +133,7 @@ function Popup(): React.JSX.Element {
             <img className="brand-logo" src="capsule-bgless.png" alt="" />
             <div className="brand-copy">
               <h1>Context Capsule</h1>
-              <p>Zen / Firefox workspace adapter</p>
+              <p>{BROWSER_LABEL} workspace adapter</p>
             </div>
           </div>
           <span className="connection" data-connected={connected ? "true" : "false"}>

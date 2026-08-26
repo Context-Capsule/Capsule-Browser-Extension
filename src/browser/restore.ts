@@ -10,6 +10,7 @@ import {
   restorableUrl,
   savedWindowSimilarity,
 } from "./model";
+import { IS_FIREFOX } from "../platform";
 
 interface TabsGroupingApi {
   group(options: { tabIds: number | number[]; createProperties?: { windowId?: number }; groupId?: number }): Promise<number>;
@@ -75,7 +76,8 @@ const NON_NORMAL_GEOMETRY_RETRIES = 3;
 const NORMAL_GEOMETRY_TOLERANCE = 8;
 const TAB_ORDER_SETTLE_MS = 60;
 const TAB_ORDER_RETRIES = 3;
-const WINDOW_REUSE_OVERLAP_WEIGHT = 1_000_000_000_000;
+const WINDOW_REUSE_UNPINNED_OVERLAP_WEIGHT = 1_000_000_000_000;
+const WINDOW_REUSE_TOTAL_OVERLAP_WEIGHT = 1_000_000_000;
 
 function groupingApis(): { tabs?: TabsGroupingApi; groups?: TabGroupsApi } {
   const root = browser as unknown as {
@@ -311,8 +313,8 @@ function liveWindowTopologiesMatch(left: browser.windows.Window, right: browser.
   });
 }
 
-function semanticTabKey(url: string, cookieStoreId: string | undefined): string {
-  return `${cookieStoreId ?? ""}\u0000${url}`;
+function semanticTabKey(url: string, cookieStoreId: string | undefined, pinned: boolean): string {
+  return `${pinned ? "p" : "u"}\u0000${cookieStoreId ?? ""}\u0000${url}`;
 }
 
 function multisetOverlap(left: string[], right: string[]): number {
@@ -334,15 +336,15 @@ function reusableTabOverlap(saved: BrowserWindowSnapshot, current: browser.windo
   const savedRelevant = saved.tabs.filter((tab) => tab.restorable && isRestorableUrl(tab.url));
   const liveRelevant = (current.tabs ?? []).filter((tab) => tab.url !== undefined && isRestorableUrl(tab.url));
 
-  const savedKeys = savedRelevant.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id));
-  const liveKeys = liveRelevant.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId));
+  const savedKeys = savedRelevant.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id, tab.pinned));
+  const liveKeys = liveRelevant.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId, tab.pinned));
   const overlap = multisetOverlap(savedKeys, liveKeys);
 
   const savedUnpinned = savedRelevant.filter((tab) => !tab.pinned);
   const liveUnpinned = liveRelevant.filter((tab) => !tab.pinned);
   const unpinnedOverlap = multisetOverlap(
-    savedUnpinned.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id)),
-    liveUnpinned.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId)),
+    savedUnpinned.map((tab) => semanticTabKey(tab.url, tab.cookie_store_id, false)),
+    liveUnpinned.map((tab) => semanticTabKey(tab.url!, tab.cookieStoreId, false)),
   );
 
   // The user's common restore case is a live window that is literally a subset
@@ -387,6 +389,12 @@ function buildExistingWindowMatch(
   const similarity = savedWindowSimilarity(saved, liveTabs(current));
   const reuse = reusableTabOverlap(saved, current);
   const strongFuzzyIdentity = similarity.score > 0;
+  // Shared Zen Essentials/pinned tabs exist in more than one Zen window and
+  // cannot establish which saved window owns a live window. Require real
+  // semantic evidence (or a disposable blank shell) for global assignment.
+  if (!(similarity.exact || strongFuzzyIdentity || reuse.liveSubset || disposableBootstrapWindow(current))) {
+    return undefined;
+  }
 
   const savedCoverage = reuse.savedRelevant > 0 ? reuse.overlap / reuse.savedRelevant : (similarity.exact ? 1 : 0);
   const liveCoverage = reuse.liveRelevant > 0 ? reuse.overlap / reuse.liveRelevant : (similarity.exact ? 1 : 0);
@@ -397,12 +405,10 @@ function buildExistingWindowMatch(
     10_000_000 - Math.min(10_000_000, reuse.liveRelevant * 100_000 + liveTabCount * 10_000),
   );
 
-  // The leading term makes total reusable tab count the global objective. The
-  // smaller terms break ties in favor of exact/subset semantic identity, then
-  // cheap shells (blank/fewer unrelated tabs), and finally saved geometry. A
-  // final +1 keeps even a zero-overlap live window preferable to a dummy slot:
-  // if a real window exists, reuse it before creating another one.
-  const weight = reuse.overlap * WINDOW_REUSE_OVERLAP_WEIGHT
+  // Ordinary user tabs establish window identity. Total overlap is only
+  // secondary so shared Zen Essentials cannot outweigh unpinned evidence.
+  const weight = reuse.unpinnedOverlap * WINDOW_REUSE_UNPINNED_OVERLAP_WEIGHT
+    + reuse.overlap * WINDOW_REUSE_TOTAL_OVERLAP_WEIGHT
     + (similarity.exact ? 500_000_000 : 0)
     + (reuse.liveSubset ? 200_000_000 : 0)
     + (strongFuzzyIdentity ? 50_000_000 : 0)
@@ -513,11 +519,46 @@ function assignExistingWindows(
   );
 
   const result = new Map<number, ExistingWindowMatch>();
+  const usedCurrentIndexes = new Set<number>();
   assignment.forEach((currentIndex, savedIndex) => {
     if (currentIndex === undefined) return;
     const candidate = candidateGrid[savedIndex]?.[currentIndex];
-    if (candidate) result.set(savedIndex, candidate);
+    if (!candidate) return;
+    result.set(savedIndex, candidate);
+    usedCurrentIndexes.add(currentIndex);
   });
+
+  // A zero-overlap nonblank shell is safe to reuse only when there is exactly
+  // one unmatched saved window and one unused live window. With several saved
+  // windows, arbitrary shell assignment can move the survivor into the wrong
+  // Zen window's geometry and hide the fact that a window is missing.
+  const unmatchedSavedIndexes = savedWindows
+    .map((_, index) => index)
+    .filter((index) => !result.has(index));
+  const unusedCurrentIndexes = currentWindows
+    .map((_, index) => index)
+    .filter((index) => !usedCurrentIndexes.has(index));
+  if (unmatchedSavedIndexes.length === 1 && unusedCurrentIndexes.length === 1) {
+    const savedIndex = unmatchedSavedIndexes[0]!;
+    const currentIndex = unusedCurrentIndexes[0]!;
+    const saved = savedWindows[savedIndex]!;
+    const current = currentWindows[currentIndex]!;
+    if (current.id !== undefined) {
+      const similarity = savedWindowSimilarity(saved, liveTabs(current));
+      const reuse = reusableTabOverlap(saved, current);
+      result.set(savedIndex, {
+        window: current,
+        exact: similarity.exact,
+        score: similarity.score,
+        overlap: reuse.overlap,
+        savedRelevant: reuse.savedRelevant,
+        liveRelevant: reuse.liveRelevant,
+        liveSubset: reuse.liveSubset,
+        weight: 1,
+      });
+    }
+  }
+
   return result;
 }
 
@@ -541,7 +582,7 @@ function mapExistingTabs(saved: BrowserWindowSnapshot, current: browser.windows.
         // tabs; their private zen-essential bit is not exposed. Never consume a
         // live pinned tab as an unpinned target, because doing so would require
         // unpinning it and could silently demote an Essential.
-        && !(tab.pinned && !savedTab.pinned))
+        && !(IS_FIREFOX && tab.pinned && !savedTab.pinned))
       .sort((left, right) => {
         const leftPinPenalty = left.pinned === savedTab.pinned ? 0 : 1;
         const rightPinPenalty = right.pinned === savedTab.pinned ? 0 : 1;
@@ -666,11 +707,13 @@ async function reuseAssignedWindow(
   const originalTabIds = (current.tabs ?? [])
     .map((tab) => tab.id)
     .filter((id): id is number => id !== undefined);
-  const protectedPinnedIds = new Set(
-    (current.tabs ?? [])
-      .filter((tab) => tab.id !== undefined && tab.pinned)
-      .map((tab) => tab.id as number),
-  );
+  const protectedPinnedIds = IS_FIREFOX
+    ? new Set(
+        (current.tabs ?? [])
+          .filter((tab) => tab.id !== undefined && tab.pinned)
+          .map((tab) => tab.id as number),
+      )
+    : new Set<number>();
   const reusedCount = restoredByIndex.size;
 
   for (const savedTab of [...saved.tabs].sort((a, b) => a.index - b.index)) {
@@ -994,7 +1037,7 @@ export async function restoreFirefoxSnapshot(
     let preservedPinnedWindows = 0;
     for (const current of currentWindows) {
       if (current.id === undefined || usedWindowIds.has(current.id)) continue;
-      if ((current.tabs ?? []).some((tab) => tab.pinned)) {
+      if (IS_FIREFOX && (current.tabs ?? []).some((tab) => tab.pinned)) {
         preservedPinnedWindows += 1;
         continue;
       }

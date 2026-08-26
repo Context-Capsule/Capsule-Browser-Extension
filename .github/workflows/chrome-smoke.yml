@@ -1,0 +1,137 @@
+name: Chrome Extension Smoke
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chrome-smoke-windows:
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Verify POTUS runner
+        shell: pwsh
+        run: |
+          if ('${{ runner.name }}' -ne 'POTUS') { throw "Expected runner POTUS, got '${{ runner.name }}'" }
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --no-frozen-lockfile
+      - name: Build Chrome extension
+        run: pnpm build:chrome
+      - name: Download Chrome for Testing
+        shell: pwsh
+        run: |
+          $metadata = Invoke-RestMethod -Uri 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json'
+          $download = $metadata.channels.Stable.downloads.chrome | Where-Object { $_.platform -eq 'win64' } | Select-Object -First 1
+          if (-not $download) { throw 'Stable Chrome for Testing win64 download was not found' }
+          $archive = Join-Path $env:RUNNER_TEMP 'chrome-for-testing-win64.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'context-capsule-chrome-for-testing'
+          Remove-Item $archive -Force -ErrorAction SilentlyContinue
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri $download.url -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $root -Force
+          $chrome = Join-Path $root 'chrome-win64\chrome.exe'
+          if (-not (Test-Path $chrome)) { throw "Chrome for Testing executable not found at $chrome" }
+          Write-Host "Chrome for Testing $($metadata.channels.Stable.version): $chrome"
+          "CONTEXT_CAPSULE_CHROME_FOR_TESTING=$chrome" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Launch isolated Chrome for Testing and verify the extension loads
+        shell: pwsh
+        run: |
+          $chrome = $env:CONTEXT_CAPSULE_CHROME_FOR_TESTING
+          if (-not $chrome -or -not (Test-Path $chrome)) { throw 'Chrome for Testing executable is unavailable' }
+
+          $extensionId = 'gmffhdppfaeonombpbbgnldagfeabiof'
+          $extensionDir = (Resolve-Path 'dist-chrome').Path
+          $profile = Join-Path $env:RUNNER_TEMP 'context-capsule-chrome-smoke-profile'
+          Remove-Item $profile -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $profile -Force | Out-Null
+          $port = 9223
+          $stdout = Join-Path $env:RUNNER_TEMP 'context-capsule-chrome-smoke.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'context-capsule-chrome-smoke.stderr.log'
+          Remove-Item $stdout,$stderr -Force -ErrorAction SilentlyContinue
+
+          $args = @(
+            "--user-data-dir=$profile",
+            "--remote-debugging-port=$port",
+            "--disable-extensions-except=$extensionDir",
+            "--load-extension=$extensionDir",
+            '--no-first-run',
+            '--no-default-browser-check',
+            'about:blank'
+          )
+          $process = Start-Process -FilePath $chrome -ArgumentList $args -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            $debugReady = $false
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 300
+              try {
+                $null = Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/version" -TimeoutSec 2
+                $debugReady = $true
+                break
+              } catch {
+                if ($process.HasExited) { break }
+              }
+            }
+            if (-not $debugReady) {
+              $err = if (Test-Path $stderr) { Get-Content $stderr -Raw } else { '' }
+              throw "Chrome for Testing remote debugging did not start. stderr=$err"
+            }
+
+            Start-Process -FilePath $chrome -ArgumentList @(
+              "--user-data-dir=$profile",
+              "chrome-extension://$extensionId/popup/popup.html"
+            ) | Out-Null
+
+            $loaded = $false
+            $targets = @()
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 300
+              $targets = @(Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/list" -TimeoutSec 2)
+              if ($targets | Where-Object { $_.url -like "chrome-extension://$extensionId/*" }) {
+                $loaded = $true
+                break
+              }
+            }
+            if (-not $loaded) {
+              $urls = ($targets | ForEach-Object { $_.url }) -join "`n"
+              throw "Context Capsule Chrome extension did not load with the expected ID $extensionId. Targets:`n$urls"
+            }
+
+            $manifest = Get-Content 'dist-chrome/manifest.json' -Raw | ConvertFrom-Json
+            if ($manifest.manifest_version -ne 3) { throw 'Chrome build is not Manifest V3' }
+            if ($manifest.background.service_worker -ne 'background.js') { throw 'Chrome background service worker is missing' }
+            if ($manifest.permissions -notcontains 'nativeMessaging') { throw 'Chrome build lost nativeMessaging permission' }
+            Write-Host "Real Chrome for Testing extension smoke passed for $extensionId using $chrome"
+          }
+          finally {
+            if (-not $process.HasExited) {
+              taskkill /PID $process.Id /T /F 2>$null | Out-Null
+              $global:LASTEXITCODE = 0
+            }
+            Remove-Item $profile -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      - name: Publish Chrome extension smoke status
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          $state = if ($env:JOB_STATUS -eq 'success') { 'success' } elseif ($env:JOB_STATUS -eq 'cancelled') { 'error' } else { 'failure' }
+          $body = @{ state = $state; context = 'ci/potus-chrome-extension-smoke'; description = "POTUS Chrome extension smoke: $($env:JOB_STATUS)" } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/statuses/$env:GITHUB_SHA" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } -ContentType 'application/json' -Body $body | Out-Null

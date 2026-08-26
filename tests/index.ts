@@ -548,3 +548,118 @@ assert(zeroOverlapReport.reused_windows === 1 && zeroOverlapReport.created_windo
 assert(zeroOverlapReport.reused_tabs === 0 && zeroOverlapReport.created_tabs === 1, "the shell should reuse the window while creating only the missing tab");
 
 console.log("zero-overlap shell reuse regression test passed");
+
+// Regression: two Zen windows were saved. The large one disappears entirely,
+// while the smaller one survives with one ordinary tab missing. Shared pinned
+// Essentials must not make the surviving small window match the missing large
+// window. The small window is repaired in place and the large window is recreated.
+mockWindows.splice(0, mockWindows.length, {
+  id: 40,
+  focused: true,
+  incognito: false,
+  state: "normal",
+  left: -7,
+  top: -7,
+  width: 1550,
+  height: 878,
+  tabs: [
+    liveTab(4000, 0, "https://essential-one.test", true),
+    liveTab(4001, 1, "https://essential-two.test", true),
+    liveTab(4002, 2, "https://small-a.test"),
+    liveTab(4003, 3, "https://small-c.test"),
+  ],
+});
+windowUpdates.splice(0, windowUpdates.length);
+nextTabId = 4100;
+nativeBlankCreates = 0;
+
+const sharedEssential = (index: number, url: string): BrowserTabSnapshot => ({
+  index,
+  url,
+  pinned: true,
+  active: false,
+  discarded: false,
+  muted: false,
+  restorable: true,
+});
+const zenPartialRestoreSnapshot: FirefoxSnapshot = {
+  schema_version: 1,
+  browser: "firefox",
+  extension_version: "0.1.7",
+  captured_at_unix_ms: 5,
+  skipped_private_windows: 0,
+  windows: [
+    {
+      key: "large-saved-window",
+      focused: false,
+      state: "normal",
+      left: 1900,
+      top: 100,
+      width: 1050,
+      height: 700,
+      tabs: [
+        sharedEssential(0, "https://essential-one.test"),
+        sharedEssential(1, "https://essential-two.test"),
+        savedTab(2, "https://large-a.test"),
+        savedTab(3, "https://large-b.test"),
+        savedTab(4, "https://large-c.test"),
+        savedTab(5, "https://large-d.test", true),
+      ],
+      groups: [],
+    },
+    {
+      key: "small-saved-window",
+      focused: true,
+      state: "normal",
+      left: -7,
+      top: -7,
+      width: 1550,
+      height: 878,
+      tabs: [
+        sharedEssential(0, "https://essential-one.test"),
+        sharedEssential(1, "https://essential-two.test"),
+        savedTab(2, "https://small-a.test"),
+        savedTab(3, "https://small-b.test"),
+        savedTab(4, "https://small-c.test", true),
+      ],
+      groups: [],
+    },
+  ],
+};
+
+const zenPartialReport = await restoreFirefoxSnapshot(zenPartialRestoreSnapshot, {
+  createBlankWindow: async () => {
+    nativeBlankCreates += 1;
+    mockWindows.push({
+      id: 41,
+      focused: false,
+      incognito: false,
+      state: "normal",
+      left: 2000,
+      top: 150,
+      width: 800,
+      height: 600,
+      tabs: [liveTab(4099, 0, "about:newtab")],
+    });
+    return "created";
+  },
+});
+
+assert(nativeBlankCreates === 1, "the completely closed large Zen window must be recreated exactly once");
+assert(mockWindows.length === 2, "restore should finish with the two saved Zen windows");
+assert(mockWindow(40).left === -7 && mockWindow(40).top === -7, "the surviving small window must keep the small saved geometry");
+assert(
+  mockWindow(40).tabs.filter((tab: Record<string, any>) => !tab.pinned).map((tab: Record<string, any>) => tab.url).join("|")
+    === "https://small-a.test|https://small-b.test|https://small-c.test",
+  "the surviving small Zen window must restore its one missing ordinary tab",
+);
+assert(mockWindow(41).left === 1900 && mockWindow(41).top === 100, "the recreated large Zen window must receive the large saved geometry");
+assert(
+  mockWindow(41).tabs.some((tab: Record<string, any>) => tab.url === "https://large-d.test"),
+  "the recreated large Zen window must receive its saved ordinary tabs",
+);
+assert(zenPartialReport.reused_windows === 1, "only the surviving small window should be reused");
+assert(zenPartialReport.created_windows === 1, "the missing large window should be reported as created");
+assert(zenPartialReport.created_tabs === 7, "restore should create six large-window tabs and one missing small-window tab");
+
+console.log("partial multi-window Zen restore regression test passed");

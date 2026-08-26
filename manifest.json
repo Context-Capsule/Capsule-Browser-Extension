@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Context Capsule",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "Capture and restore Firefox windows, tabs, tab groups, and containers with Context Capsule.",
   "icons": {
     "1254": "popup/capsule-bgless.png"
