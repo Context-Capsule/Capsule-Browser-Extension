@@ -56,6 +56,10 @@ const native = new NativeClient((status) => {
   nativeStatus = status;
   if (status.connected && !wasConnected) {
     queueMicrotask(() => persistDiagnostic("info", `${BROWSER_LABEL} adapter connected to native host`));
+    // Reconnecting can happen after the native host is installed/reinstalled
+    // while the browser is already open. Publish semantic state immediately so
+    // a CLI save does not have to wait for a tab event or periodic timer.
+    queueMicrotask(() => scheduleSync(0, "startup"));
   }
 });
 
