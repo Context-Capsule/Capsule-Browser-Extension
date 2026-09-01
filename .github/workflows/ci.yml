@@ -2,7 +2,7 @@ name: Extension CI
 
 on:
   push:
-    branches: [main, 'agent/**', 'feature/**']
+    branches: [main, 'agent/**', 'feature/**', 'fix/**']
   pull_request:
   workflow_dispatch:
 
@@ -40,6 +40,7 @@ jobs:
         run: pnpm test:build-targets
       - name: Publish Windows extension status
         if: always()
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,6 +76,7 @@ jobs:
         run: pnpm test:build-targets
       - name: Publish Linux extension status
         if: always()
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,6 +155,7 @@ jobs:
           Write-Host "Exact 'pnpm dev' watch-mode test passed with the logo present in dist."
       - name: Publish development-watch status
         if: always()
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -200,6 +203,7 @@ jobs:
         run: pnpm dev:isolated -- --smoke
       - name: Publish isolated Firefox status
         if: always()
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -248,6 +252,7 @@ jobs:
         run: pnpm dev:isolated -- --smoke
       - name: Publish isolated Zen status
         if: always()
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
