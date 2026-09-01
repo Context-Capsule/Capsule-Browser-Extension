@@ -81,9 +81,9 @@ export interface RestoreReport {
 
 export interface ComparableLiveTab {
   index: number;
-  url?: string;
+  url?: string | undefined;
   pinned: boolean;
-  cookieStoreId?: string;
+  cookieStoreId?: string | undefined;
 }
 
 export interface SavedWindowSimilarity {
