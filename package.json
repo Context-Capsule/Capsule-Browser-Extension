@@ -1,6 +1,6 @@
 {
   "name": "capsule-firefox-extension",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "description": "Firefox/Zen and Chrome browser adapter for Context Capsule",
   "license": "MIT",
